@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.db
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Local/generated storage
+backend/storage/
+storage/
+*.tmp
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,42 @@
+SLC Document Tools - GitHub Upload
+==================================
+
+Upload/commit the entire repository except local secrets and generated folders.
+
+Required top-level files/folders:
+- .gitignore
+- README.md
+- backend/
+- frontend/
+
+Important production files:
+- backend/Dockerfile
+- backend/railway.json
+- backend/requirements.txt
+- backend/.env.example
+- backend/app/main.py
+- backend/app/database.py
+- backend/app/models.py
+- backend/app/schemas.py
+- backend/app/services/linked_images.py
+- backend/app/services/storage.py
+- backend/app/services/word_to_pdf.py
+- backend/app/formatter/*
+- backend/tests/*
+- frontend/package.json
+- frontend/tsconfig.json
+- frontend/next-env.d.ts
+- frontend/.env.example
+- frontend/app/*
+
+DO NOT upload/commit:
+- backend/.env
+- frontend/.env.local
+- .venv/
+- node_modules/
+- .next/
+- local database files (*.db)
+- generated documents/storage
+
+Railway secrets belong in Railway Variables.
+Vercel NEXT_PUBLIC_API_URL belongs in Vercel Environment Variables.

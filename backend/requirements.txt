@@ -1,0 +1,11 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+Pillow==11.3.0
+python-docx==1.2.0
+pypdf==6.0.0
+httpx==0.28.1
+SQLAlchemy==2.0.43
+psycopg2-binary==2.9.10
+boto3==1.40.15
+python-dotenv==1.1.1
