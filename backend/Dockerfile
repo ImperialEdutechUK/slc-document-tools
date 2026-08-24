@@ -4,32 +4,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080
 
-# Install LibreOffice and required fonts.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libreoffice-writer \
        fontconfig \
-       fonts-ebgaramond \
        fonts-liberation \
        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Tell Linux/LibreOffice to use EB Garamond whenever
-# a Word document requests the family "Garamond".
-RUN mkdir -p /etc/fonts/conf.d \
-    && printf '%s\n' \
-       '<?xml version="1.0"?>' \
-       '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
-       '<fontconfig>' \
-       '  <alias>' \
-       '    <family>Garamond</family>' \
-       '    <prefer>' \
-       '      <family>EB Garamond</family>' \
-       '    </prefer>' \
-       '  </alias>' \
-       '</fontconfig>' \
-       > /etc/fonts/local.conf \
-    && fc-cache -f -v
+# Install the exact licensed Garamond fonts used by Microsoft Word
+RUN mkdir -p /usr/local/share/fonts/garamond
+
+COPY fonts/GARA.TTF /usr/local/share/fonts/garamond/GARA.TTF
+COPY fonts/GARABD.TTF /usr/local/share/fonts/garamond/GARABD.TTF
+COPY fonts/GARAIT.TTF /usr/local/share/fonts/garamond/GARAIT.TTF
+
+# Rebuild the Linux font cache
+RUN fc-cache -f -v
 
 WORKDIR /app
 
