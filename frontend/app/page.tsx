@@ -285,6 +285,8 @@ function FormatterPanel() {
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
 
+  const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
+
   async function submit(event: FormEvent) {
     event.preventDefault();
 
@@ -300,7 +302,10 @@ function FormatterPanel() {
       form.append("document", document);
       form.append("awarding_body", awardingBody);
       form.append("course_name", courseName);
-      form.append("chapter", chapter);
+
+      if (!batchMode) {
+        form.append("chapter", chapter);
+      }
 
       form.append(
         "auto_download_links",
@@ -311,12 +316,16 @@ function FormatterPanel() {
         form.append("cover_image", cover);
       }
 
-      images.forEach((image) => {
-        form.append("images", image);
-      });
+      if (!batchMode) {
+        images.forEach((image) => {
+          form.append("images", image);
+        });
+      }
 
       const result = await apiRequest(
-        "/api/v1/formatter/format",
+        batchMode
+          ? "/api/v1/formatter/batch"
+          : "/api/v1/formatter/format",
         {
           method: "POST",
           body: form,
@@ -337,6 +346,7 @@ function FormatterPanel() {
 
   const imageDetails = job?.details?.images;
   const linked = job?.details?.linked_images;
+  const batchDetails = batchMode ? job?.details : null;
 
   return (
     <form
@@ -352,13 +362,13 @@ function FormatterPanel() {
           <h2>Document Formatter</h2>
 
           <p>
-            Format the DOCX, retrieve linked images
-            automatically, and use manual uploads only where
-            needed.
+            Format one DOCX or process a complete ZIP batch,
+            retrieve linked images automatically, and produce
+            validation reports with the output.
           </p>
         </div>
 
-        <div className="hero-badge">DOCX</div>
+        <div className="hero-badge">DOCX / ZIP</div>
       </section>
 
       <div className="two-column">
@@ -399,10 +409,23 @@ function FormatterPanel() {
 
             <input
               value={chapter}
+              disabled={batchMode}
+              placeholder={
+                batchMode
+                  ? "Taken from each DOCX filename in ZIP mode"
+                  : undefined
+              }
               onChange={(event) =>
                 setChapter(event.target.value)
               }
             />
+
+            {batchMode && (
+              <small>
+                Each formatted document uses its own filename as
+                the cover chapter / unit title.
+              </small>
+            )}
           </label>
         </section>
 
@@ -413,21 +436,25 @@ function FormatterPanel() {
             <div>
               <h3>Source document</h3>
               <p>
-                Drag and drop the DOCX and optional cover
-                image.
+                Drag and drop one DOCX or a ZIP containing
+                multiple DOCX files, plus an optional cover image.
               </p>
             </div>
           </div>
 
           <FileField
-            label="Source DOCX"
-            accept=".docx"
-            onChange={(files) =>
-              setDocument(files[0] || null)
-            }
+            label="Source DOCX / ZIP"
+            accept=".docx,.zip"
+            onChange={(files) => {
+              const next = files[0] || null;
+              setDocument(next);
+              if (next?.name.toLowerCase().endsWith(".zip")) {
+                setImages([]);
+              }
+            }}
             help={
               document?.name ||
-              "DOCX only"
+              "DOCX or ZIP containing DOCX files"
             }
           />
 
@@ -480,26 +507,35 @@ function FormatterPanel() {
           </span>
         </label>
 
-        <FileField
-          label="Manual images / image ZIP (optional)"
-          accept=".jpg,.jpeg,.png,.webp,.zip"
-          multiple
-          onChange={setImages}
-          help={
-            images.length
-              ? `${images.length} file(s) selected`
-              : "Drag images or ZIP here as a fallback or override"
-          }
-        />
+        {!batchMode ? (
+          <>
+            <FileField
+              label="Manual images / image ZIP (optional)"
+              accept=".jpg,.jpeg,.png,.webp,.zip"
+              multiple
+              onChange={setImages}
+              help={
+                images.length
+                  ? `${images.length} file(s) selected`
+                  : "Drag images or ZIP here as a fallback or override"
+              }
+            />
 
-        {images.length > 0 && (
-          <div className="file-list">
-            {images.map((file) => (
-              <span key={`${file.name}-${file.size}`}>
-                {file.name}
-              </span>
-            ))}
-          </div>
+            {images.length > 0 && (
+              <div className="file-list">
+                {images.map((file) => (
+                  <span key={`${file.name}-${file.size}`}>
+                    {file.name}
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <small>
+            ZIP batch mode retrieves linked images separately for each
+            DOCX. Manual image overrides remain available in single-DOCX mode.
+          </small>
         )}
       </section>
 
@@ -512,47 +548,77 @@ function FormatterPanel() {
         disabled={!document || busy}
         type="submit"
       >
-        {busy ? "Formatting…" : "Format document"}
+        {busy
+          ? batchMode
+            ? "Formatting batch…"
+            : "Formatting…"
+          : batchMode
+          ? "Format ZIP batch"
+          : "Format document"}
       </button>
 
       {job && (
         <>
           <JobResult
             job={job}
-            title="Formatted document ready"
+            title={batchMode ? "Formatted ZIP batch ready" : "Formatted document ready"}
           />
 
-          <div className="metrics">
-            <div>
-              <span>Placeholders</span>
-              <strong>
-                {imageDetails?.placeholders ?? 0}
-              </strong>
-            </div>
+          {batchMode ? (
+            <div className="metrics">
+              <div>
+                <span>Detected</span>
+                <strong>{batchDetails?.documents_detected ?? 0}</strong>
+              </div>
 
-            <div>
-              <span>Inserted</span>
-              <strong>
-                {imageDetails?.inserted ?? 0}
-              </strong>
-            </div>
+              <div>
+                <span>Formatted</span>
+                <strong>{batchDetails?.formatted ?? 0}</strong>
+              </div>
 
-            <div>
-              <span>Missing</span>
-              <strong>
-                {imageDetails?.missing?.length ?? 0}
-              </strong>
-            </div>
+              <div>
+                <span>Skipped</span>
+                <strong>{batchDetails?.skipped ?? 0}</strong>
+              </div>
 
-            <div>
-              <span>Linked downloads</span>
-              <strong>
-                {linked?.downloaded ?? 0}
-              </strong>
+              <div>
+                <span>Failed</span>
+                <strong>{batchDetails?.failed ?? 0}</strong>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="metrics">
+              <div>
+                <span>Placeholders</span>
+                <strong>
+                  {imageDetails?.placeholders ?? 0}
+                </strong>
+              </div>
 
-          {linked?.entries?.length > 0 && (
+              <div>
+                <span>Inserted</span>
+                <strong>
+                  {imageDetails?.inserted ?? 0}
+                </strong>
+              </div>
+
+              <div>
+                <span>Missing</span>
+                <strong>
+                  {imageDetails?.missing?.length ?? 0}
+                </strong>
+              </div>
+
+              <div>
+                <span>Linked downloads</span>
+                <strong>
+                  {linked?.downloaded ?? 0}
+                </strong>
+              </div>
+            </div>
+          )}
+
+          {!batchMode && linked?.entries?.length > 0 && (
             <section className="card compact-card">
               <h3>Linked image results</h3>
 

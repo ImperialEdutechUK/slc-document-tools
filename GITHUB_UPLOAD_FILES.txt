@@ -21,6 +21,8 @@ Important production files:
 - backend/app/services/linked_images.py
 - backend/app/services/storage.py
 - backend/app/services/word_to_pdf.py
+- backend/app/services/batch_formatter.py
+- backend/app/services/zip_utils.py
 - backend/app/formatter/*
 - backend/tests/*
 - frontend/package.json

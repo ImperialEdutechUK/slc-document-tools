@@ -25,6 +25,7 @@ from .formatter.pdf_editing import PdfEditingError, get_pdf_page_count, remove_p
 from .models import Job
 from .schemas import JobResponse
 from .services.linked_images import LinkedImageResult, download_linked_images
+from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
 
@@ -228,6 +229,64 @@ async def format_document(
     except Exception as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/formatter/batch", response_model=JobResponse)
+async def format_document_batch(
+    document: Annotated[UploadFile, File(...)],
+    awarding_body: Annotated[str, Form()] = "",
+    course_name: Annotated[str, Form()] = "",
+    auto_download_links: Annotated[bool, Form()] = True,
+    cover_image: Annotated[UploadFile | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(document.filename or "").suffix.lower() != ".zip":
+        raise HTTPException(status_code=400, detail="Upload a ZIP containing DOCX documents.")
+
+    job = _new_job(db, "format_batch", document.filename)
+    try:
+        zip_bytes = await document.read()
+        cover_bytes = await cover_image.read() if cover_image else None
+        cover_ext = (
+            Path(cover_image.filename or "cover.jpg").suffix.lstrip(".")
+            if cover_image
+            else "jpg"
+        )
+
+        result = format_zip_batch(
+            zip_bytes,
+            zip_filename=document.filename or "Course.zip",
+            awarding_body=awarding_body,
+            course_name=course_name,
+            auto_download_links=auto_download_links,
+            cover_bytes=cover_bytes,
+            cover_ext=cover_ext,
+        )
+
+        output_key = f"jobs/{job.id}/{result.output_filename}"
+        report_key = f"jobs/{job.id}/batch_report.txt"
+        storage.put_bytes(output_key, result.payload, "application/zip")
+        storage.put_bytes(
+            report_key,
+            result.report_text.encode("utf-8"),
+            "text/plain; charset=utf-8",
+        )
+
+        job = _complete_job(
+            db,
+            job,
+            output_filename=result.output_filename,
+            output_key=output_key,
+            report_key=report_key,
+            details=result.details,
+        )
+        return _job_response(job)
+    except BatchFormatterError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="Batch formatting failed.") from exc
 
 
 @app.post(f"{API_PREFIX}/word-to-pdf", response_model=JobResponse)

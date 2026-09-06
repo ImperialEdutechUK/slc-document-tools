@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import zipfile
 
+from .zip_utils import safe_zip_member
+
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
@@ -15,11 +17,6 @@ ZIP_MIME = "application/zip"
 
 class WordToPdfError(ValueError):
     pass
-
-
-def _safe_zip_member(name: str) -> bool:
-    path = PurePosixPath(name)
-    return not path.is_absolute() and ".." not in path.parts and not name.startswith("__MACOSX/")
 
 
 def expand_word_inputs(file_items: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
@@ -35,7 +32,7 @@ def expand_word_inputs(file_items: list[tuple[str, bytes]]) -> list[tuple[str, b
         try:
             with zipfile.ZipFile(BytesIO(payload)) as archive:
                 for info in archive.infolist():
-                    if info.is_dir() or not _safe_zip_member(info.filename):
+                    if info.is_dir() or not safe_zip_member(info.filename):
                         continue
                     if Path(info.filename).suffix.lower() != ".docx":
                         continue

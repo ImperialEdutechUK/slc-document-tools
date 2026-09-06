@@ -20,6 +20,20 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - Footer/page numbering.
 - Existing numbered-image insertion and validation.
 - Manual JPG/PNG/WebP/ZIP image uploads.
+- DOCX or ZIP input from the same formatter screen.
+- Page-aware cover layout: the background and both Word textbox representations are aligned to the actual output section size.
+
+### ZIP batch formatting
+
+The formatter can now process a ZIP of course documents in one job:
+
+- Safe in-memory ZIP extraction rejects absolute paths, traversal entries, Windows drive paths, and `__MACOSX` metadata.
+- `Assignment Brief` and `Written Assignment Template` DOCX files are skipped from SLC formatting and copied unchanged into `skipped/`.
+- Eligible DOCX files reuse the existing formatter and linked-image workflow.
+- Each formatted document receives its own validation report.
+- One document failure does not stop the remaining batch.
+- The result ZIP contains `formatted/`, `reports/`, `skipped/`, and `batch_report.txt`.
+- Batch cover chapter/unit titles are derived from each DOCX filename while Awarding Body and Course Name remain shared inputs.
 
 New linked-image automation is included:
 
@@ -140,6 +154,7 @@ Direct public image URLs work independently of the stock API.
 
 ```text
 POST /api/v1/formatter/format
+POST /api/v1/formatter/batch
 POST /api/v1/word-to-pdf
 POST /api/v1/pdf/page-count
 POST /api/v1/pdf/remove-pages
@@ -155,11 +170,11 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The migrated backend currently has **40 passing tests**, covering the original formatter helpers plus linked-image detection/manual overrides and Word-to-PDF conversion.
+The backend currently has **47 passing tests**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
 
 ## Next implementation step
 
-The best next step is to test the linked-image workflow against a real course DOCX containing the exact photo-link pattern used by the content team. Once that sample is available, the matching rules can be tightened before deployment. After that, the next high-value feature is full batch ZIP formatting rather than only ZIP-based Word-to-PDF conversion.
+The next useful production check is to run the formatter against a representative real course ZIP containing the content team's normal filenames and linked-image patterns. That will validate naming conventions and external image retrieval under Railway production credentials before release.
 
 ## Legacy Magnific / Freepik resource links
 
