@@ -241,6 +241,9 @@ function JobResult({
         <span className="success-dot" />
         <strong>{title}</strong>
         <p>{job.output_filename}</p>
+        {job.details?.build && (
+          <small>Backend build: {job.details.build}</small>
+        )}
       </div>
 
       <div className="result-actions">
@@ -771,12 +774,24 @@ function WordPdfPanel() {
       </button>
 
       {job && (
-        <JobResult
-          job={job}
-          title={`${
-            job.details?.converted_documents || 1
-          } PDF file(s) ready`}
-        />
+        <>
+          <JobResult
+            job={job}
+            title={`${
+              job.details?.converted_documents || 1
+            } PDF file(s) ready`}
+          />
+
+          {job.details?.font_matches && (
+            <section className="card compact-card">
+              <h3>PDF font rendering</h3>
+              <p>
+                The server resolved Garamond to <strong>{job.details.font_matches.Garamond || "unavailable"}</strong>.
+                This prevents LibreOffice from silently replacing it with an unrelated serif font.
+              </p>
+            </section>
+          )}
+        </>
       )}
     </form>
   );

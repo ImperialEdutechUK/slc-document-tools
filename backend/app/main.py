@@ -31,8 +31,9 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
+BUILD_VERSION = "2026.09.06-v3-cover-font"
 
-app = FastAPI(title=APP_NAME, version="0.1.0")
+app = FastAPI(title=APP_NAME, version="0.3.0")
 
 origins = [
     item.strip()
@@ -152,7 +153,7 @@ def _linked_report_text(link_result: LinkedImageResult) -> str:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": APP_NAME}
+    return {"status": "ok", "service": APP_NAME, "build": BUILD_VERSION}
 
 
 @app.post(f"{API_PREFIX}/formatter/format", response_model=JobResponse)
@@ -207,6 +208,7 @@ async def format_document(
         storage.put_bytes(report_key, validation_text.encode("utf-8"), "text/plain; charset=utf-8")
 
         details = {
+            "build": BUILD_VERSION,
             "log": log,
             "images": {
                 "placeholders": placement_report.total_placeholders,
@@ -263,6 +265,7 @@ async def format_document_batch(
             cover_ext=cover_ext,
         )
 
+        result.details["build"] = BUILD_VERSION
         output_key = f"jobs/{job.id}/{result.output_filename}"
         report_key = f"jobs/{job.id}/batch_report.txt"
         storage.put_bytes(output_key, result.payload, "application/zip")
@@ -301,6 +304,7 @@ async def word_to_pdf(
     try:
         items = [(item.filename or "document.docx", await item.read()) for item in files]
         output_filename, payload, content_type, details = convert_word_files(items)
+        details["build"] = BUILD_VERSION
         output_key = f"jobs/{job.id}/{output_filename}"
         storage.put_bytes(output_key, payload, content_type)
         job = _complete_job(

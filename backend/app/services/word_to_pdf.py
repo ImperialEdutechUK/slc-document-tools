@@ -56,6 +56,42 @@ def _unique_name(name: str, used: set[str]) -> str:
     return candidate
 
 
+def _font_match(family: str) -> str | None:
+    """Return the Linux font family LibreOffice/fontconfig will use."""
+
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
+        return None
+    try:
+        completed = subprocess.run(
+            [fc_match, "-f", "%{family}", family],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    result = (completed.stdout or "").strip()
+    return result or None
+
+
+def _font_environment() -> dict[str, str | None]:
+    # These are the Microsoft families used by the formatter template or
+    # commonly encountered in source Word documents. The Docker image maps
+    # them to metric/similar Linux families where Microsoft fonts cannot be
+    # legally bundled with the application.
+    return {
+        "Garamond": _font_match("Garamond"),
+        "Calibri": _font_match("Calibri"),
+        "Cambria": _font_match("Cambria"),
+        "Arial": _font_match("Arial"),
+        "Times New Roman": _font_match("Times New Roman"),
+    }
+
+
 def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes, str, dict]:
     documents = expand_word_inputs(file_items)
     libreoffice = shutil.which("libreoffice") or shutil.which("soffice")
@@ -70,10 +106,17 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
     with tempfile.TemporaryDirectory() as tmp:
         input_dir = Path(tmp) / "input"
         output_dir = Path(tmp) / "output"
+        profile_dir = Path(tmp) / "libreoffice-profile"
         input_dir.mkdir()
         output_dir.mkdir()
+        profile_dir.mkdir()
 
-        for index, (name, payload) in enumerate(documents, start=1):
+        # Each request gets a separate LibreOffice profile. This avoids stale
+        # font caches and lock conflicts when Railway processes conversions in
+        # parallel.
+        profile_arg = f"-env:UserInstallation={profile_dir.resolve().as_uri()}"
+
+        for name, payload in documents:
             safe_docx_name = _unique_name(Path(name).name, set(p.name.lower() for p in input_dir.iterdir()))
             input_path = input_dir / safe_docx_name
             input_path.write_bytes(payload)
@@ -81,9 +124,10 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
             completed = subprocess.run(
                 [
                     libreoffice,
+                    profile_arg,
                     "--headless",
                     "--convert-to",
-                    "pdf",
+                    "pdf:writer_pdf_Export",
                     "--outdir",
                     str(output_dir),
                     str(input_path),
@@ -105,7 +149,11 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
             converted.append((pdf_name, generated.read_bytes()))
             generated.unlink(missing_ok=True)
 
-    details = {"input_documents": len(documents), "converted_documents": len(converted)}
+    details = {
+        "input_documents": len(documents),
+        "converted_documents": len(converted),
+        "font_matches": _font_environment(),
+    }
     if len(converted) == 1:
         return converted[0][0], converted[0][1], PDF_MIME, details
 

@@ -10,6 +10,8 @@ from app.formatter.cover_layout import (
     W_NS,
     WP_NS,
     WPS_NS,
+    WP14_NS,
+    BACKGROUND_BLEED_PT,
     position_cover_background,
     position_cover_textboxes,
     vqn,
@@ -102,14 +104,36 @@ class CoverLayoutTests(unittest.TestCase):
 
         self.assertEqual(changed, 1)
         self.assertEqual("page", pos_h.get("relativeFrom"))
-        self.assertEqual("0", pos_h.find(qn(WP_NS, "posOffset")).text)
+        self.assertEqual(str(round(-BACKGROUND_BLEED_PT * EMU_PER_POINT)), pos_h.find(qn(WP_NS, "posOffset")).text)
         self.assertEqual("page", pos_v.get("relativeFrom"))
-        self.assertEqual("0", pos_v.find(qn(WP_NS, "posOffset")).text)
-        self.assertEqual(str(600 * EMU_PER_POINT), extent.get("cx"))
-        self.assertEqual(str(800 * EMU_PER_POINT), extent.get("cy"))
+        self.assertEqual(str(round(-BACKGROUND_BLEED_PT * EMU_PER_POINT)), pos_v.find(qn(WP_NS, "posOffset")).text)
+        self.assertEqual(str(round((600 + 2 * BACKGROUND_BLEED_PT) * EMU_PER_POINT)), extent.get("cx"))
+        self.assertEqual(str(round((800 + 2 * BACKGROUND_BLEED_PT) * EMU_PER_POINT)), extent.get("cy"))
         self.assertEqual(extent.get("cx"), inner_extent.get("cx"))
         self.assertEqual(extent.get("cy"), inner_extent.get("cy"))
         self.assertEqual("1", anchor.get("behindDoc"))
+
+    def test_background_removes_word_relative_size_hints_and_aspect_lock(self):
+        host = ET.Element(wqn("p"))
+        anchor = ET.SubElement(host, qn(WP_NS, "anchor"), {"layoutInCell": "1"})
+        ET.SubElement(anchor, qn(WP_NS, "simplePos"), {"x": "0", "y": "0"})
+        ET.SubElement(anchor, qn(WP_NS, "positionH"), {"relativeFrom": "page"})
+        ET.SubElement(anchor, qn(WP_NS, "positionV"), {"relativeFrom": "paragraph"})
+        ET.SubElement(anchor, qn(WP_NS, "extent"), {"cx": "7772400", "cy": "10050780"})
+        locks = ET.SubElement(anchor, qn(A_NS, "graphicFrameLocks"), {"noChangeAspect": "1"})
+        ET.SubElement(anchor, qn(A_NS, "blip"))
+        size_h = ET.SubElement(anchor, qn(WP14_NS, "sizeRelH"), {"relativeFrom": "margin"})
+        ET.SubElement(size_h, qn(WP14_NS, "pctWidth")).text = "0"
+        size_v = ET.SubElement(anchor, qn(WP14_NS, "sizeRelV"), {"relativeFrom": "margin"})
+        ET.SubElement(size_v, qn(WP14_NS, "pctHeight")).text = "0"
+
+        changed = position_cover_background(host)
+
+        self.assertEqual(changed, 1)
+        self.assertIsNone(anchor.find(qn(WP14_NS, "sizeRelH")))
+        self.assertIsNone(anchor.find(qn(WP14_NS, "sizeRelV")))
+        self.assertEqual("0", locks.get("noChangeAspect"))
+        self.assertEqual("0", anchor.get("layoutInCell"))
 
     def test_non_textbox_shape_is_untouched(self):
         host = ET.Element(wqn("p"))

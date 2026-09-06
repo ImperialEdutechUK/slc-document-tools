@@ -8,24 +8,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libreoffice-writer \
        fontconfig \
+       fonts-ebgaramond \
+       fonts-crosextra-carlito \
+       fonts-crosextra-caladea \
        fonts-liberation \
        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the exact licensed Garamond fonts used by Microsoft Word
-RUN mkdir -p /usr/local/share/fonts/garamond
-
-COPY fonts/GARA.TTF /usr/local/share/fonts/garamond/GARA.TTF
-COPY fonts/GARABD.TTF /usr/local/share/fonts/garamond/GARABD.TTF
-COPY fonts/GARAIT.TTF /usr/local/share/fonts/garamond/GARAIT.TTF
-
-# Rebuild the Linux font cache
-RUN fc-cache -f -v
+# Font family aliases used when LibreOffice renders Office-authored DOCX files.
+# No proprietary Microsoft font files are bundled in this repository.
+COPY fontconfig/99-slc-font-aliases.conf /etc/fonts/conf.d/99-slc-font-aliases.conf
+RUN fc-cache -f
 
 WORKDIR /app
 
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app

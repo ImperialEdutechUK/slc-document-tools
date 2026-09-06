@@ -21,7 +21,7 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - Existing numbered-image insertion and validation.
 - Manual JPG/PNG/WebP/ZIP image uploads.
 - DOCX or ZIP input from the same formatter screen.
-- Page-aware cover layout: the background and both Word textbox representations are aligned to the actual output section size.
+- Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
 ### ZIP batch formatting
 
@@ -49,7 +49,8 @@ New linked-image automation is included:
 
 ### Word → PDF
 
-A separate workflow converts files without applying SLC formatting:
+A separate workflow converts files without applying SLC formatting. The Railway image now installs EB Garamond and explicit fontconfig aliases so a DOCX requesting `Garamond` no longer falls back to an unrelated Linux serif font. Calibri and Cambria also receive metric-compatible Linux mappings. Each conversion reports the font family resolved by the server.
+
 
 - Single DOCX → PDF.
 - Multiple DOCX files → ZIP containing PDFs.
@@ -109,7 +110,7 @@ Create a Railway project containing:
 2. A **bucket/object-storage** service if persistent document output is required.
 3. A backend service whose root directory is `backend/` and which builds from `backend/Dockerfile`.
 
-The Docker image installs LibreOffice Writer so DOCX → PDF conversion happens on Railway rather than inside Vercel functions.
+The Docker image installs LibreOffice Writer plus the open-source font packages used for stable Office-font substitution. No proprietary Microsoft font files are bundled in the repository.
 
 Set backend variables using `backend/.env.example` as the guide. In particular:
 
@@ -123,6 +124,8 @@ The backend health check is:
 ```text
 GET /health
 ```
+
+The response includes `build: 2026.09.06-v3-cover-font`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -170,7 +173,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **47 passing tests**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
+The backend currently has **48 passing tests**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
 
 ## Next implementation step
 
