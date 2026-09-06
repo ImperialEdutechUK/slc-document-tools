@@ -8,16 +8,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libreoffice-writer \
        fontconfig \
-       fonts-ebgaramond \
-       fonts-crosextra-carlito \
-       fonts-crosextra-caladea \
        fonts-liberation \
        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Font family aliases used when LibreOffice renders Office-authored DOCX files.
-# No proprietary Microsoft font files are bundled in this repository.
-COPY fontconfig/99-slc-font-aliases.conf /etc/fonts/conf.d/99-slc-font-aliases.conf
+# Exact Garamond only. No EB Garamond or fontconfig Garamond alias is installed.
+# Put properly licensed Garamond .ttf/.otf files in backend/fonts/ through your
+# private deployment process. The repository package intentionally contains no
+# proprietary font binaries.
+COPY fonts/ /usr/local/share/fonts/slc/
 RUN fc-cache -f
 
 WORKDIR /app

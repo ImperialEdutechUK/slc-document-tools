@@ -11,7 +11,7 @@ Required top-level files/folders:
 
 Important production files:
 - backend/Dockerfile
-- backend/fontconfig/99-slc-font-aliases.conf
+- backend/fonts/README.txt
 - backend/railway.json
 - backend/requirements.txt
 - backend/.env.example

@@ -51,7 +51,7 @@ class BatchFormatterTests(unittest.TestCase):
 
     @patch("app.services.batch_formatter.process")
     @patch("app.services.batch_formatter.download_linked_images")
-    def test_batch_builds_formatted_reports_skipped_and_summary_zip(self, linked_mock, process_mock):
+    def test_batch_builds_only_formatted_and_skipped_folders(self, linked_mock, process_mock):
         linked_mock.return_value = LinkedImageResult()
         process_mock.return_value = (b"formatted-docx", ["ok"], "VALIDATION\n", None, None)
         source = make_zip(
@@ -79,17 +79,15 @@ class BatchFormatterTests(unittest.TestCase):
 
         with zipfile.ZipFile(BytesIO(result.payload)) as archive:
             names = set(archive.namelist())
+            self.assertIn("formatted/", names)
+            self.assertIn("skipped/", names)
             self.assertIn("formatted/Unit 01_SLC_formatted.docx", names)
             self.assertIn("formatted/Unit 02_SLC_formatted.docx", names)
-            self.assertIn("reports/Unit 01_validation_report.txt", names)
-            self.assertIn("reports/Unit 02_validation_report.txt", names)
             self.assertIn("skipped/Unit 01 - Assignment Brief.docx", names)
             self.assertIn("skipped/Unit 01 - Written Assignment Template.docx", names)
-            self.assertIn("batch_report.txt", names)
-            report = archive.read("batch_report.txt").decode("utf-8")
-            self.assertIn("Documents detected: 4", report)
-            self.assertIn("Formatted:          2", report)
-            self.assertIn("Skipped:            2", report)
+            self.assertFalse(any(name.startswith("reports/") for name in names))
+            self.assertNotIn("batch_report.txt", names)
+            self.assertTrue(all(name.startswith(("formatted/", "skipped/")) for name in names))
 
         self.assertEqual(2, process_mock.call_count)
         first_call = process_mock.call_args_list[0].args
@@ -110,6 +108,8 @@ class BatchFormatterTests(unittest.TestCase):
         self.assertIn("broken document", result.details["failures"][0]["reason"])
         with zipfile.ZipFile(BytesIO(result.payload)) as archive:
             self.assertIn("formatted/Good_SLC_formatted.docx", archive.namelist())
+            self.assertIn("skipped/Bad.docx", archive.namelist())
+            self.assertNotIn("batch_report.txt", archive.namelist())
 
 
 if __name__ == "__main__":

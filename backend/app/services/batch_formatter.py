@@ -41,7 +41,6 @@ class BatchFailure:
 class BatchResult:
     output_filename: str
     payload: bytes
-    report_text: str
     details: dict
 
 
@@ -109,56 +108,6 @@ def extract_batch_documents(zip_bytes: bytes) -> list[BatchDocument]:
     return documents
 
 
-def _linked_report_text(link_result: LinkedImageResult) -> str:
-    if not link_result.entries and not link_result.warnings:
-        return ""
-    lines = ["", "Linked image retrieval", "----------------------"]
-    for entry in link_result.entries:
-        label = {
-            "downloaded": "OK",
-            "failed": "FAILED",
-            "manual_override": "MANUAL OVERRIDE",
-        }.get(entry.status, entry.status.upper())
-        line = f"Image {entry.number}: {label} - {entry.source_type} - {entry.url}"
-        if entry.message:
-            line += f" ({entry.message})"
-        lines.append(line)
-    for warning in link_result.warnings:
-        lines.append(f"Warning: {warning}")
-    return "\n".join(lines) + "\n"
-
-
-def _batch_report(aggregate: _Aggregate) -> str:
-    lines = [
-        "SLC Batch Formatting Report",
-        "===========================",
-        "",
-        f"Documents detected: {aggregate.detected}",
-        f"Formatted:          {aggregate.formatted}",
-        f"Skipped:            {aggregate.skipped}",
-        f"Failed:             {aggregate.failed}",
-        "",
-        f"Linked images downloaded: {aggregate.linked_downloaded}",
-        f"Linked image failures:    {aggregate.linked_failed}",
-    ]
-
-    if aggregate.skipped_files:
-        lines.extend(["", "SKIPPED", "-------"])
-        lines.extend(f"- {name}" for name in aggregate.skipped_files)
-
-    if aggregate.failures:
-        lines.extend(["", "FAILED", "------"])
-        for failure in aggregate.failures:
-            lines.append(f"- {failure.filename}")
-            lines.append(f"  Reason: {failure.reason}")
-
-    if aggregate.formatted_files:
-        lines.extend(["", "FORMATTED", "---------"])
-        lines.extend(f"- {name}" for name in aggregate.formatted_files)
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def format_zip_batch(
     zip_bytes: bytes,
     *,
@@ -174,10 +123,8 @@ def format_zip_batch(
     aggregate = _Aggregate(detected=len(documents))
 
     formatted_items: list[tuple[str, bytes]] = []
-    report_items: list[tuple[str, bytes]] = []
     skipped_items: list[tuple[str, bytes]] = []
     used_formatted: set[str] = set()
-    used_reports: set[str] = set()
     used_skipped: set[str] = set()
 
     for document in documents:
@@ -202,8 +149,6 @@ def format_zip_batch(
                 _friendly_title(document.filename),
                 linked_result.items,
             )
-            validation_text += _linked_report_text(linked_result)
-
             aggregate.linked_downloaded += linked_result.to_dict()["downloaded"]
             aggregate.linked_failed += linked_result.to_dict()["failed"]
             aggregate.formatted += 1
@@ -212,27 +157,27 @@ def format_zip_batch(
                 f"{Path(document.filename).stem}_SLC_formatted.docx",
                 used_formatted,
             )
-            report_name = _unique_name(
-                f"{Path(document.filename).stem}_validation_report.txt",
-                used_reports,
-            )
             aggregate.formatted_files.append(formatted_name)
             formatted_items.append((formatted_name, result_bytes))
-            report_items.append((report_name, validation_text.encode("utf-8")))
         except Exception as exc:  # keep the rest of the batch moving
             aggregate.failed += 1
             aggregate.failures.append(BatchFailure(document.filename, str(exc)))
+            # Keep the original DOCX rather than dropping a failed item. The
+            # output archive intentionally has only formatted/ and skipped/.
+            skipped_name = _unique_name(document.filename, used_skipped)
+            skipped_items.append((skipped_name, document.payload))
 
-    report_text = _batch_report(aggregate)
     output = BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        # Explicit directory entries keep both requested folders visible even
+        # when one of them is empty. No reports or root-level report files are
+        # written to the user-facing ZIP.
+        archive.writestr("formatted/", b"")
+        archive.writestr("skipped/", b"")
         for name, payload in formatted_items:
             archive.writestr(f"formatted/{name}", payload)
-        for name, payload in report_items:
-            archive.writestr(f"reports/{name}", payload)
         for name, payload in skipped_items:
             archive.writestr(f"skipped/{name}", payload)
-        archive.writestr("batch_report.txt", report_text.encode("utf-8"))
 
     stem = Path(zip_filename or "Course").stem.strip() or "Course"
     safe_stem = "".join(
@@ -256,4 +201,4 @@ def format_zip_batch(
             "failed": aggregate.linked_failed,
         },
     }
-    return BatchResult(output_filename, output.getvalue(), report_text, details)
+    return BatchResult(output_filename, output.getvalue(), details)

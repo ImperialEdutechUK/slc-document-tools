@@ -366,8 +366,8 @@ function FormatterPanel() {
 
           <p>
             Format one DOCX or process a complete ZIP batch,
-            retrieve linked images automatically, and produce
-            validation reports with the output.
+            retrieve linked images automatically, and download
+            only the formatted and skipped folders for ZIP batches.
           </p>
         </div>
 
@@ -782,12 +782,11 @@ function WordPdfPanel() {
             } PDF file(s) ready`}
           />
 
-          {job.details?.font_matches && (
+          {job.details?.garamond_exact && (
             <section className="card compact-card">
               <h3>PDF font rendering</h3>
               <p>
-                The server resolved Garamond to <strong>{job.details.font_matches.Garamond || "unavailable"}</strong>.
-                This prevents LibreOffice from silently replacing it with an unrelated serif font.
+                PDF font: <strong>Garamond</strong>. Exact Garamond is installed on the server; font substitution is disabled.
               </p>
             </section>
           )}

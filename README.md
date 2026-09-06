@@ -30,9 +30,8 @@ The formatter can now process a ZIP of course documents in one job:
 - Safe in-memory ZIP extraction rejects absolute paths, traversal entries, Windows drive paths, and `__MACOSX` metadata.
 - `Assignment Brief` and `Written Assignment Template` DOCX files are skipped from SLC formatting and copied unchanged into `skipped/`.
 - Eligible DOCX files reuse the existing formatter and linked-image workflow.
-- Each formatted document receives its own validation report.
 - One document failure does not stop the remaining batch.
-- The result ZIP contains `formatted/`, `reports/`, `skipped/`, and `batch_report.txt`.
+- The result ZIP contains only `formatted/` and `skipped/`. No report folder or batch report file is added.
 - Batch cover chapter/unit titles are derived from each DOCX filename while Awarding Body and Course Name remain shared inputs.
 
 New linked-image automation is included:
@@ -49,7 +48,7 @@ New linked-image automation is included:
 
 ### Word → PDF
 
-A separate workflow converts files without applying SLC formatting. The Railway image now installs EB Garamond and explicit fontconfig aliases so a DOCX requesting `Garamond` no longer falls back to an unrelated Linux serif font. Calibri and Cambria also receive metric-compatible Linux mappings. Each conversion reports the font family resolved by the server.
+A separate workflow converts files without applying SLC formatting. The formatter writes `Garamond` explicitly throughout the document. PDF conversion is now **Garamond-only**: EB Garamond aliases and substitutions have been removed. Before conversion, the server verifies that fontconfig resolves the family exactly as `Garamond`; if exact Garamond is unavailable, conversion stops with a clear error rather than changing the font. Proprietary font binaries are not bundled in this repository; provide a properly licensed Garamond family through the private Railway deployment under `backend/fonts/`.
 
 
 - Single DOCX → PDF.
@@ -125,7 +124,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.09.06-v3-cover-font`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.09.06-v4-garamond-only`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 

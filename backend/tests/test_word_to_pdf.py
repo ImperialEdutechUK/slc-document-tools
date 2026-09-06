@@ -5,7 +5,12 @@ from io import BytesIO
 
 from docx import Document
 
-from app.services.word_to_pdf import convert_word_files, expand_word_inputs
+from app.services.word_to_pdf import (
+    _font_match,
+    _is_exact_font_match,
+    convert_word_files,
+    expand_word_inputs,
+)
 
 
 def make_docx(text="Hello"):
@@ -17,6 +22,11 @@ def make_docx(text="Hello"):
 
 
 class WordToPdfTests(unittest.TestCase):
+    def test_exact_garamond_rejects_substitute_family(self):
+        self.assertTrue(_is_exact_font_match("Garamond", "Garamond"))
+        self.assertFalse(_is_exact_font_match("Garamond", "EB Garamond,EB Garamond 08"))
+        self.assertFalse(_is_exact_font_match("Garamond", "Noto Serif"))
+
     def test_expands_docx_from_zip_and_ignores_other_files(self):
         buffer = BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
@@ -25,7 +35,11 @@ class WordToPdfTests(unittest.TestCase):
         documents = expand_word_inputs([("unit.zip", buffer.getvalue())])
         self.assertEqual(["a.docx"], [name for name, _ in documents])
 
-    @unittest.skipUnless(shutil.which("libreoffice") or shutil.which("soffice"), "LibreOffice not installed")
+    @unittest.skipUnless(
+        (shutil.which("libreoffice") or shutil.which("soffice"))
+        and _is_exact_font_match("Garamond", _font_match("Garamond")),
+        "LibreOffice or exact Garamond not installed",
+    )
     def test_converts_single_docx_to_pdf(self):
         name, payload, mime, details = convert_word_files([("sample.docx", make_docx())])
         self.assertEqual("sample.pdf", name)

@@ -31,9 +31,9 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.09.06-v3-cover-font"
+BUILD_VERSION = "2026.09.06-v4-garamond-only"
 
-app = FastAPI(title=APP_NAME, version="0.3.0")
+app = FastAPI(title=APP_NAME, version="0.4.0")
 
 origins = [
     item.strip()
@@ -267,20 +267,14 @@ async def format_document_batch(
 
         result.details["build"] = BUILD_VERSION
         output_key = f"jobs/{job.id}/{result.output_filename}"
-        report_key = f"jobs/{job.id}/batch_report.txt"
         storage.put_bytes(output_key, result.payload, "application/zip")
-        storage.put_bytes(
-            report_key,
-            result.report_text.encode("utf-8"),
-            "text/plain; charset=utf-8",
-        )
 
         job = _complete_job(
             db,
             job,
             output_filename=result.output_filename,
             output_key=output_key,
-            report_key=report_key,
+            report_key=None,
             details=result.details,
         )
         return _job_response(job)

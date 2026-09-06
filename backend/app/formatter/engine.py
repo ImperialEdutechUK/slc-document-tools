@@ -214,6 +214,55 @@ def apply_style_tweaks(styles_path):
     restore_xml_namespaces(root, namespaces)
     tree.write(styles_path, xml_declaration=True, encoding="UTF-8")
 
+def force_garamond_runs(root):
+    """Force every directly formatted run in a Word XML part to Garamond.
+
+    Style defaults already use Garamond, but source DOCX files can carry direct
+    Calibri/Arial/etc. run formatting that overrides the style. Normalising
+    rFonts here guarantees the formatted document itself requests Garamond
+    throughout, including cover textbox runs.
+    """
+    changed = 0
+    for run in root.iter(wt("r")):
+        rPr = run.find(wt("rPr"))
+        if rPr is None:
+            rPr = ET.Element(wt("rPr"))
+            run.insert(0, rPr)
+        rFonts = rPr.find(wt("rFonts"))
+        if rFonts is None:
+            rFonts = ET.Element(wt("rFonts"))
+            rPr.insert(0, rFonts)
+        rFonts.attrib.clear()
+        for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+            rFonts.set(wt(key), "Garamond")
+        changed += 1
+    return changed
+
+
+def force_garamond_word_parts(word_dir):
+    """Apply exact Garamond run declarations to all Word text XML parts."""
+    changed = 0
+    for part_path in Path(word_dir).rglob("*.xml"):
+        try:
+            namespaces = collect_xml_namespaces(str(part_path))
+            tree = ET.parse(part_path)
+        except (ET.ParseError, OSError):
+            continue
+        root = tree.getroot()
+        part_changed = force_garamond_runs(root)
+        if not part_changed:
+            continue
+        restore_xml_namespaces(root, namespaces)
+        tree.write(
+            part_path,
+            xml_declaration=True,
+            encoding="UTF-8",
+            short_empty_elements=True,
+        )
+        changed += part_changed
+    return changed
+
+
 def update_cover_text(cover_para, awarding_body, course_name, chapter):
     fields = [awarding_body, course_name, chapter]
     seen = 0
@@ -741,6 +790,11 @@ def process(
             xml_declaration=True,
             encoding="UTF-8",
             short_empty_elements=True
+        )
+
+        garamond_runs = force_garamond_word_parts(word_out)
+        log.append(
+            f"✔ Garamond enforced on {garamond_runs} Word run(s); no alternate font family written"
         )
 
         return (

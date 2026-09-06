@@ -57,7 +57,7 @@ def _unique_name(name: str, used: set[str]) -> str:
 
 
 def _font_match(family: str) -> str | None:
-    """Return the Linux font family LibreOffice/fontconfig will use."""
+    """Return the family fontconfig would use for a requested font."""
 
     fc_match = shutil.which("fc-match")
     if not fc_match:
@@ -78,18 +78,30 @@ def _font_match(family: str) -> str | None:
     return result or None
 
 
-def _font_environment() -> dict[str, str | None]:
-    # These are the Microsoft families used by the formatter template or
-    # commonly encountered in source Word documents. The Docker image maps
-    # them to metric/similar Linux families where Microsoft fonts cannot be
-    # legally bundled with the application.
-    return {
-        "Garamond": _font_match("Garamond"),
-        "Calibri": _font_match("Calibri"),
-        "Cambria": _font_match("Cambria"),
-        "Arial": _font_match("Arial"),
-        "Times New Roman": _font_match("Times New Roman"),
-    }
+def _is_exact_font_match(requested: str, resolved: str | None) -> bool:
+    """True only when fontconfig resolves to the requested family itself."""
+
+    if not resolved:
+        return False
+    requested_key = requested.casefold().strip()
+    # fontconfig can return multiple comma-separated family aliases for the
+    # same physical font. Accept only an exact family name, never a fallback
+    # such as EB Garamond, Noto Serif, Liberation Serif, etc.
+    families = [part.strip().casefold() for part in resolved.split(",") if part.strip()]
+    return requested_key in families
+
+
+def _require_exact_garamond() -> str:
+    resolved = _font_match("Garamond")
+    if not _is_exact_font_match("Garamond", resolved):
+        shown = resolved or "unavailable"
+        raise WordToPdfError(
+            "Exact Garamond is not installed on the PDF conversion server "
+            f"(fontconfig resolved the request to: {shown}). Conversion was stopped "
+            "to prevent font substitution. Install a properly licensed Garamond "
+            "font family in backend/fonts/ and redeploy Railway."
+        )
+    return resolved
 
 
 def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes, str, dict]:
@@ -99,6 +111,10 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
         raise WordToPdfError(
             "LibreOffice is not installed on the processing server. The Railway Docker image must include LibreOffice."
         )
+
+    # The SLC formatter is Garamond-only. Do not allow LibreOffice to silently
+    # substitute EB Garamond or any other serif font during PDF export.
+    garamond_family = _require_exact_garamond()
 
     converted: list[tuple[str, bytes]] = []
     used_names: set[str] = set()
@@ -152,7 +168,9 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
     details = {
         "input_documents": len(documents),
         "converted_documents": len(converted),
-        "font_matches": _font_environment(),
+        "pdf_font": "Garamond",
+        "garamond_exact": True,
+        "garamond_family": garamond_family,
     }
     if len(converted) == 1:
         return converted[0][0], converted[0][1], PDF_MIME, details
