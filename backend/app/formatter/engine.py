@@ -315,14 +315,49 @@ def paragraph_has_toc_field(para):
 
     return False
 
+def _sdt_is_toc_block(sdt):
+    """Return True if a <w:sdt> content control is a Word "Automatic Table of
+    Contents" (the gallery-inserted TOC a course author adds via the Word
+    References ribbon). That gallery TOC is tagged with a docPartGallery of
+    "Table of Contents" on its <w:sdtPr>, and/or contains a TOCHeading-styled
+    paragraph or a TOC field anywhere inside its <w:sdtContent>.
+    """
+    sdtPr = sdt.find(wt("sdtPr"))
+    if sdtPr is not None:
+        docPartObj = sdtPr.find(wt("docPartObj"))
+        if docPartObj is not None:
+            gallery = docPartObj.find(wt("docPartGallery"))
+            if gallery is not None and gallery.get(wt("val"), "") == "Table of Contents":
+                return True
+
+    for para in sdt.iter(wt("p")):
+        txt = para_text(para)
+        pPr = para.find(wt("pPr"))
+        pStyle = pPr.find(wt("pStyle")) if pPr is not None else None
+        style_val = pStyle.get(wt("val"), "") if pStyle is not None else ""
+        if txt.lower() == "table of contents":
+            return True
+        if style_val.startswith("TOC") or paragraph_has_toc_field(para):
+            return True
+
+    return False
+
+
 def remove_toc_from_document(out_body):
     removed = 0
     in_toc_block = False
 
-    for para in list(out_body):
-        if para.tag != wt("p"):
+    for elem in list(out_body):
+        if elem.tag == wt("sdt"):
+            if _sdt_is_toc_block(elem):
+                out_body.remove(elem)
+                removed += 1
             continue
 
+        if elem.tag != wt("p"):
+            continue
+
+        para = elem
         txt = para_text(para)
         pPr = para.find(wt("pPr"))
         pStyle = pPr.find(wt("pStyle")) if pPr is not None else None
@@ -393,6 +428,20 @@ def add_bullets_to_references(out_body):
 
     return changed
 
+      # A4 page (11906 twips wide) with 1440-twip (1") margins on each side,
+      # matching set_a4_on_all_sections(). The footer tab stops MUST be
+      # derived from this usable width rather than hardcoded: the previous
+      # constants (4680/9360) were sized for US Letter (12240 twips wide),
+      # where 9360 = 12240 - 2*1440 lines up exactly with the right margin.
+      # On this A4 document the usable width is only 9026 twips, so a tab
+      # stop fixed at 9360 sits ~334 twips past the true right margin and
+      # causes the page-number field to collide with the trailing "| Page"
+      # text instead of reading cleanly as "N | Page".
+FOOTER_PAGE_WIDTH_TWIPS = 11906
+FOOTER_PAGE_MARGIN_TWIPS = 1440
+FOOTER_RIGHT_TAB_TWIPS = FOOTER_PAGE_WIDTH_TWIPS - (2 * FOOTER_PAGE_MARGIN_TWIPS)
+FOOTER_CENTER_TAB_TWIPS = FOOTER_RIGHT_TAB_TWIPS // 2
+
 def make_footer_xml(course_name, page_on_right):
     page_field = (
         '<w:r><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>'
@@ -416,7 +465,8 @@ def make_footer_xml(course_name, page_on_right):
         '<w:p><w:pPr>'
         '<w:pStyle w:val="Footer"/>'
         '<w:pBdr><w:top w:val="single" w:sz="24" w:space="1" w:color="1A99A0"/></w:pBdr>'
-        '<w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs>'
+        '<w:tabs><w:tab w:val="center" w:pos="' + str(FOOTER_CENTER_TAB_TWIPS) + '"/>'
+        '<w:tab w:val="right" w:pos="' + str(FOOTER_RIGHT_TAB_TWIPS) + '"/></w:tabs>'
         '</w:pPr>' + body + '</w:p></w:ftr>'
     )
 
