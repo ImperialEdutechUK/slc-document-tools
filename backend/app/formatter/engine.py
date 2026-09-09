@@ -591,6 +591,66 @@ def iter_section_props_in_order(out_body):
         elif child.tag == wt("sectPr"):
             yield child
 
+def _paragraph_has_manual_page_break(para):
+    """Return True if this <w:p> contains a manual page break run
+    (<w:br w:type="page"/>), which is how Word marks the end of one page
+    and the start of the next when there is no section break.
+    """
+    for br in para.findall(".//" + wt("br")):
+        if br.get(wt("type"), "") == "page":
+            return True
+    return False
+
+
+def strip_uploaded_first_page(out_body):
+    """Remove the user-uploaded document's own first page.
+
+    Course authors sometimes hand in a .docx that already starts with its
+    own cover/title page (a stock photo, a title block, etc). Left alone,
+    that page survives untouched in the final output and ends up sitting
+    as a stray extra page between the SLC-generated cover and the unit
+    content, because this formatter always prepends its own cover + TOC
+    rather than replacing what is already there.
+
+    This removes every paragraph up to and including the first manual
+    page break (<w:br w:type="page"/>) or the first section break
+    (<w:sectPr> on a paragraph), whichever comes first — that boundary is
+    how Word denotes "page 1 ends here" in the source file. If neither is
+    present in the document, nothing is removed: without an explicit
+    break there is no reliable, content-safe way to know where the
+    author's first page actually ends, and guessing risks deleting real
+    unit content.
+
+    Numbering is unaffected by this: page numbers still start at 1 on the
+    first page of the newly-inserted front matter, exactly as before,
+    because set_page_number_start(sPr, 1) is applied to the first content
+    section further down in process() regardless of what was trimmed here.
+    """
+    to_remove = []
+    found_break = False
+    for para in list(out_body):
+        if para.tag != wt("p"):
+            break
+
+        pPr = para.find(wt("pPr"))
+        has_section_break = pPr is not None and pPr.find(wt("sectPr")) is not None
+        has_manual_break = _paragraph_has_manual_page_break(para)
+
+        to_remove.append(para)
+
+        if has_manual_break or has_section_break:
+            found_break = True
+            break
+
+    if not found_break:
+        return 0
+
+    for para in to_remove:
+        out_body.remove(para)
+
+    return len(to_remove)
+
+
 def process(
     target_bytes,
     cover_img_bytes,
@@ -663,6 +723,13 @@ def process(
         tmpl_body = tmpl_tree.getroot().find(wt("body"))
         out_body = out_tree.getroot().find(wt("body"))
         tmpl_paras = list(tmpl_body)
+
+        stripped_first_page = strip_uploaded_first_page(out_body)
+        if stripped_first_page:
+            log.append(
+                f"✔ Removed the uploaded document's own first page "
+                f"({stripped_first_page} paragraph(s)) before inserting the SLC cover"
+            )
 
         rels_path = os.path.join(out, "word", "_rels", "document.xml.rels")
         rels_tree = ET.parse(rels_path)
