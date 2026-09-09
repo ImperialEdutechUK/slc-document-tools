@@ -3,6 +3,7 @@
 import {
   DragEvent,
   FormEvent,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -34,7 +35,6 @@ function apiUrl(path?: string | null) {
 
 async function apiRequest(path: string, options: RequestInit) {
   const response = await fetch(`${API_BASE}${path}`, options);
-
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
@@ -46,6 +46,11 @@ async function apiRequest(path: string, options: RequestInit) {
   }
 
   return payload;
+}
+
+async function responseError(response: Response, fallback: string) {
+  const payload = await response.json().catch(() => ({}));
+  return payload.detail || payload.error || fallback;
 }
 
 /* -------------------------------------------------------
@@ -64,18 +69,15 @@ function fileMatchesAccept(file: File, accept: string) {
   const mime = file.type.toLowerCase();
 
   return rules.some((rule) => {
-    // Extension: .docx, .pdf, .zip, .jpg...
     if (rule.startsWith(".")) {
       return filename.endsWith(rule);
     }
 
-    // MIME wildcard: image/*
     if (rule.endsWith("/*")) {
       const prefix = rule.slice(0, -1);
       return mime.startsWith(prefix);
     }
 
-    // Exact MIME
     return mime === rule;
   });
 }
@@ -136,7 +138,6 @@ function FileField({
     setDragging(false);
 
     const files = Array.from(event.dataTransfer.files || []);
-
     if (!files.length) return;
 
     processFiles(files);
@@ -154,7 +155,6 @@ function FileField({
     event.preventDefault();
     event.stopPropagation();
 
-    // Required so browser knows dropping is permitted.
     event.dataTransfer.dropEffect = "copy";
     setDragging(true);
   }
@@ -182,9 +182,7 @@ function FileField({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <span className="upload-icon">
-          {dragging ? "↓" : "⇧"}
-        </span>
+        <span className="upload-icon">{dragging ? "↓" : "⇧"}</span>
 
         <span className="drop-zone-title">
           {dragging
@@ -203,23 +201,18 @@ function FileField({
           accept={accept}
           multiple={multiple}
           onChange={(event) => {
-            const selected = Array.from(
-              event.target.files || []
-            );
+            const selected = Array.from(event.target.files || []);
 
             if (selected.length) {
               processFiles(selected);
             }
 
-            // Allows selecting the same file again later.
             event.target.value = "";
           }}
         />
       </label>
 
-      {dropError && (
-        <small className="file-error">{dropError}</small>
-      )}
+      {dropError && <small className="file-error">{dropError}</small>}
     </div>
   );
 }
@@ -231,9 +224,11 @@ function FileField({
 function JobResult({
   job,
   title = "Output ready",
+  downloadLabel = "Download output",
 }: {
   job: JobResponse;
   title?: string;
+  downloadLabel?: string;
 }) {
   return (
     <section className="result-card">
@@ -252,7 +247,7 @@ function JobResult({
             className="button primary"
             href={apiUrl(job.download_url)}
           >
-            Download output
+            {downloadLabel}
           </a>
         )}
 
@@ -270,7 +265,7 @@ function JobResult({
 }
 
 /* -------------------------------------------------------
-   DOCUMENT FORMATTER
+   DOCUMENT FORMATTER + PREVIEW + PDF EXPORT
 ------------------------------------------------------- */
 
 function FormatterPanel() {
@@ -281,23 +276,46 @@ function FormatterPanel() {
   const [awardingBody, setAwardingBody] = useState("");
   const [courseName, setCourseName] = useState("");
   const [chapter, setChapter] = useState("");
-
   const [autoLinks, setAutoLinks] = useState(true);
 
   const [busy, setBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
+  const [pdfJob, setPdfJob] = useState<JobResponse | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
 
   const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
 
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
+  function resetPostFormatWorkflow() {
+    setPdfJob(null);
+    setError("");
+    setPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+      return "";
+    });
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
-
     if (!document) return;
 
     setBusy(true);
     setError("");
     setJob(null);
+    resetPostFormatWorkflow();
 
     try {
       const form = new FormData();
@@ -310,10 +328,7 @@ function FormatterPanel() {
         form.append("chapter", chapter);
       }
 
-      form.append(
-        "auto_download_links",
-        String(autoLinks)
-      );
+      form.append("auto_download_links", String(autoLinks));
 
       if (cover) {
         form.append("cover_image", cover);
@@ -338,12 +353,70 @@ function FormatterPanel() {
       setJob(result);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Formatting failed."
+        err instanceof Error ? err.message : "Formatting failed."
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function previewFormattedDocument() {
+    if (!job || batchMode) return;
+
+    setPreviewBusy(true);
+    setError("");
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/v1/jobs/${job.id}/preview`,
+        { method: "GET" }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          await responseError(response, "Preview could not be generated.")
+        );
+      }
+
+      const blob = await response.blob();
+      const nextPreviewUrl = URL.createObjectURL(blob);
+
+      setPreviewUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return nextPreviewUrl;
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Preview could not be generated."
+      );
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
+
+  async function convertFormattedDocumentToPdf() {
+    if (!job || batchMode) return;
+
+    setPdfBusy(true);
+    setError("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/convert-to-pdf`,
+        { method: "POST" }
+      );
+      setPdfJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "PDF conversion failed."
+      );
+    } finally {
+      setPdfBusy(false);
     }
   }
 
@@ -352,26 +425,18 @@ function FormatterPanel() {
   const batchDetails = batchMode ? job?.details : null;
 
   return (
-    <form
-      onSubmit={submit}
-      className="panel-stack"
-    >
+    <form onSubmit={submit} className="panel-stack">
       <section className="hero compact">
         <div>
-          <span className="eyebrow">
-            SLC Document Workflow
-          </span>
-
+          <span className="eyebrow">SLC Document Workflow</span>
           <h2>Document Formatter</h2>
-
           <p>
-            Format one DOCX or process a complete ZIP batch,
-            retrieve linked images automatically, and download
-            only the formatted and skipped folders for ZIP batches.
+            Format your document, preview the completed result and convert it
+            to PDF without moving between separate tabs.
           </p>
         </div>
 
-        <div className="hero-badge">DOCX / ZIP</div>
+        <div className="hero-badge">DOCX / PDF</div>
       </section>
 
       <div className="two-column">
@@ -387,29 +452,22 @@ function FormatterPanel() {
 
           <label className="input-label">
             Awarding Body
-
             <input
               value={awardingBody}
-              onChange={(event) =>
-                setAwardingBody(event.target.value)
-              }
+              onChange={(event) => setAwardingBody(event.target.value)}
             />
           </label>
 
           <label className="input-label">
             Course Name / Centre Text
-
             <input
               value={courseName}
-              onChange={(event) =>
-                setCourseName(event.target.value)
-              }
+              onChange={(event) => setCourseName(event.target.value)}
             />
           </label>
 
           <label className="input-label">
             Chapter / Unit Title
-
             <input
               value={chapter}
               disabled={batchMode}
@@ -418,15 +476,13 @@ function FormatterPanel() {
                   ? "Taken from each DOCX filename in ZIP mode"
                   : undefined
               }
-              onChange={(event) =>
-                setChapter(event.target.value)
-              }
+              onChange={(event) => setChapter(event.target.value)}
             />
 
             {batchMode && (
               <small>
-                Each formatted document uses its own filename as
-                the cover chapter / unit title.
+                Each formatted document uses its own filename as the cover
+                chapter / unit title.
               </small>
             )}
           </label>
@@ -439,8 +495,8 @@ function FormatterPanel() {
             <div>
               <h3>Source document</h3>
               <p>
-                Drag and drop one DOCX or a ZIP containing
-                multiple DOCX files, plus an optional cover image.
+                Drag and drop one DOCX or a ZIP containing multiple DOCX files,
+                plus an optional cover image.
               </p>
             </div>
           </div>
@@ -451,26 +507,21 @@ function FormatterPanel() {
             onChange={(files) => {
               const next = files[0] || null;
               setDocument(next);
+              setJob(null);
+              resetPostFormatWorkflow();
+
               if (next?.name.toLowerCase().endsWith(".zip")) {
                 setImages([]);
               }
             }}
-            help={
-              document?.name ||
-              "DOCX or ZIP containing DOCX files"
-            }
+            help={document?.name || "DOCX or ZIP containing DOCX files"}
           />
 
           <FileField
             label="Cover image (optional)"
             accept=".jpg,.jpeg,.png"
-            onChange={(files) =>
-              setCover(files[0] || null)
-            }
-            help={
-              cover?.name ||
-              "JPG or PNG"
-            }
+            onChange={(files) => setCover(files[0] || null)}
+            help={cover?.name || "JPG or PNG"}
           />
         </section>
       </div>
@@ -481,10 +532,9 @@ function FormatterPanel() {
 
           <div>
             <h3>Images</h3>
-
             <p>
-              Linked images are downloaded first; uploaded
-              images take priority for the same number.
+              Linked images are downloaded first; uploaded images take priority
+              for the same number.
             </p>
           </div>
         </div>
@@ -493,19 +543,14 @@ function FormatterPanel() {
           <input
             type="checkbox"
             checked={autoLinks}
-            onChange={(event) =>
-              setAutoLinks(event.target.checked)
-            }
+            onChange={(event) => setAutoLinks(event.target.checked)}
           />
 
           <span>
-            <strong>
-              Automatically retrieve linked images
-            </strong>
-
+            <strong>Automatically retrieve linked images</strong>
             <small>
-              Supports direct image URLs and configured
-              Magnific / Freepik resource links.
+              Supports direct image URLs and configured Magnific / Freepik
+              resource links.
             </small>
           </span>
         </label>
@@ -527,24 +572,20 @@ function FormatterPanel() {
             {images.length > 0 && (
               <div className="file-list">
                 {images.map((file) => (
-                  <span key={`${file.name}-${file.size}`}>
-                    {file.name}
-                  </span>
+                  <span key={`${file.name}-${file.size}`}>{file.name}</span>
                 ))}
               </div>
             )}
           </>
         ) : (
           <small>
-            ZIP batch mode retrieves linked images separately for each
-            DOCX. Manual image overrides remain available in single-DOCX mode.
+            ZIP batch mode retrieves linked images separately for each DOCX.
+            Manual image overrides remain available in single-DOCX mode.
           </small>
         )}
       </section>
 
-      {error && (
-        <div className="error-box">{error}</div>
-      )}
+      {error && <div className="error-box">{error}</div>}
 
       <button
         className="button primary large"
@@ -564,7 +605,14 @@ function FormatterPanel() {
         <>
           <JobResult
             job={job}
-            title={batchMode ? "Formatted ZIP batch ready" : "Formatted document ready"}
+            title={
+              batchMode
+                ? "Formatted ZIP batch ready"
+                : "Formatted document ready"
+            }
+            downloadLabel={
+              batchMode ? "Download formatted ZIP" : "Download formatted DOCX"
+            }
           />
 
           {batchMode ? (
@@ -590,35 +638,89 @@ function FormatterPanel() {
               </div>
             </div>
           ) : (
-            <div className="metrics">
-              <div>
-                <span>Placeholders</span>
-                <strong>
-                  {imageDetails?.placeholders ?? 0}
-                </strong>
+            <>
+              <div className="metrics">
+                <div>
+                  <span>Placeholders</span>
+                  <strong>{imageDetails?.placeholders ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Inserted</span>
+                  <strong>{imageDetails?.inserted ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Missing</span>
+                  <strong>{imageDetails?.missing?.length ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Linked downloads</span>
+                  <strong>{linked?.downloaded ?? 0}</strong>
+                </div>
               </div>
 
-              <div>
-                <span>Inserted</span>
-                <strong>
-                  {imageDetails?.inserted ?? 0}
-                </strong>
-              </div>
+              <section className="card workflow-card">
+                <div className="section-heading">
+                  <span>04</span>
 
-              <div>
-                <span>Missing</span>
-                <strong>
-                  {imageDetails?.missing?.length ?? 0}
-                </strong>
-              </div>
+                  <div>
+                    <h3>Preview and export</h3>
+                    <p>
+                      Review the formatted document here, then convert the same
+                      formatted file directly to PDF.
+                    </p>
+                  </div>
+                </div>
 
-              <div>
-                <span>Linked downloads</span>
-                <strong>
-                  {linked?.downloaded ?? 0}
-                </strong>
-              </div>
-            </div>
+                <div className="workflow-actions">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={previewBusy || pdfBusy}
+                    onClick={previewFormattedDocument}
+                  >
+                    {previewBusy ? "Generating preview…" : "Preview"}
+                  </button>
+
+                  <button
+                    className="button primary"
+                    type="button"
+                    disabled={pdfBusy || previewBusy}
+                    onClick={convertFormattedDocumentToPdf}
+                  >
+                    {pdfBusy ? "Converting to PDF…" : "Convert to PDF"}
+                  </button>
+                </div>
+
+                {previewUrl && (
+                  <div className="preview-shell">
+                    <iframe
+                      className="document-preview"
+                      src={previewUrl}
+                      title="Formatted document preview"
+                    />
+                  </div>
+                )}
+
+                {pdfJob && (
+                  <div className="pdf-result-stack">
+                    <JobResult
+                      job={pdfJob}
+                      title="PDF ready"
+                      downloadLabel="Download PDF"
+                    />
+
+                    {pdfJob.details?.second_blank_pages_removed > 0 && (
+                      <div className="success-box">
+                        The unwanted blank second page was removed automatically.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            </>
           )}
 
           {!batchMode && linked?.entries?.length > 0 && (
@@ -627,23 +729,14 @@ function FormatterPanel() {
 
               <div className="link-results">
                 {linked.entries.map((entry: any) => (
-                  <div
-                    key={`${entry.number}-${entry.url}`}
-                  >
-                    <strong>
-                      Image {entry.number}
-                    </strong>
+                  <div key={`${entry.number}-${entry.url}`}>
+                    <strong>Image {entry.number}</strong>
 
-                    <span
-                      className={`status ${entry.status}`}
-                    >
+                    <span className={`status ${entry.status}`}>
                       {entry.status.replace("_", " ")}
                     </span>
 
-                    <small>
-                      {entry.message ||
-                        entry.source_type}
-                    </small>
+                    <small>{entry.message || entry.source_type}</small>
                   </div>
                 ))}
               </div>
@@ -1044,21 +1137,14 @@ export default function Home() {
           </div>
         </div>
 
-        <span className="environment">
-          Vercel + Railway
-        </span>
+        <span className="environment">Vercel + Railway</span>
       </header>
 
       <div className="workspace">
-        <nav
-          className="tabs"
-          aria-label="Document tools"
-        >
+        <nav className="tabs" aria-label="Document tools">
           <button
             type="button"
-            className={
-              tab === "formatter" ? "active" : ""
-            }
+            className={tab === "formatter" ? "active" : ""}
             onClick={() => setTab("formatter")}
           >
             Document Formatter
@@ -1066,9 +1152,7 @@ export default function Home() {
 
           <button
             type="button"
-            className={
-              tab === "word-pdf" ? "active" : ""
-            }
+            className={tab === "word-pdf" ? "active" : ""}
             onClick={() => setTab("word-pdf")}
           >
             Word → PDF
@@ -1076,26 +1160,16 @@ export default function Home() {
 
           <button
             type="button"
-            className={
-              tab === "pdf-editor" ? "active" : ""
-            }
+            className={tab === "pdf-editor" ? "active" : ""}
             onClick={() => setTab("pdf-editor")}
           >
             PDF Editor
           </button>
         </nav>
 
-        {tab === "formatter" && (
-          <FormatterPanel />
-        )}
-
-        {tab === "word-pdf" && (
-          <WordPdfPanel />
-        )}
-
-        {tab === "pdf-editor" && (
-          <PdfEditorPanel />
-        )}
+        {tab === "formatter" && <FormatterPanel />}
+        {tab === "word-pdf" && <WordPdfPanel />}
+        {tab === "pdf-editor" && <PdfEditorPanel />}
       </div>
     </main>
   );

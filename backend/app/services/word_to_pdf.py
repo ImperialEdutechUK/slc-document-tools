@@ -7,8 +7,8 @@ import subprocess
 import tempfile
 import zipfile
 
+from ..formatter.pdf_editing import remove_blank_second_page
 from .zip_utils import safe_zip_member
-from ..formatter.pdf_editing import strip_leading_blank_pages
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -28,7 +28,9 @@ def expand_word_inputs(file_items: list[tuple[str, bytes]]) -> list[tuple[str, b
             documents.append((Path(name).name, payload))
             continue
         if suffix != ".zip":
-            raise WordToPdfError(f"Unsupported file: {name}. Upload DOCX files or a ZIP containing DOCX files.")
+            raise WordToPdfError(
+                f"Unsupported file: {name}. Upload DOCX files or a ZIP containing DOCX files."
+            )
 
         try:
             with zipfile.ZipFile(BytesIO(payload)) as archive:
@@ -119,7 +121,7 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
 
     converted: list[tuple[str, bytes]] = []
     used_names: set[str] = set()
-    total_blank_pages_removed = 0
+    second_blank_pages_removed = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         input_dir = Path(tmp) / "input"
@@ -135,7 +137,10 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
         profile_arg = f"-env:UserInstallation={profile_dir.resolve().as_uri()}"
 
         for name, payload in documents:
-            safe_docx_name = _unique_name(Path(name).name, set(p.name.lower() for p in input_dir.iterdir()))
+            safe_docx_name = _unique_name(
+                Path(name).name,
+                set(p.name.lower() for p in input_dir.iterdir()),
+            )
             input_path = input_dir / safe_docx_name
             input_path.write_bytes(payload)
 
@@ -156,18 +161,25 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
                 timeout=180,
             )
             if completed.returncode != 0:
-                message = (completed.stderr or completed.stdout or "LibreOffice conversion failed").strip()
+                message = (
+                    completed.stderr
+                    or completed.stdout
+                    or "LibreOffice conversion failed"
+                ).strip()
                 raise WordToPdfError(f"Could not convert {name}: {message}")
 
             generated = output_dir / (input_path.stem + ".pdf")
             if not generated.exists():
                 raise WordToPdfError(f"LibreOffice did not produce a PDF for {name}.")
 
-            pdf_bytes, blanks_removed = strip_leading_blank_pages(generated.read_bytes())
-            total_blank_pages_removed += blanks_removed
+            pdf_payload, removed_blank_second = remove_blank_second_page(
+                generated.read_bytes()
+            )
+            if removed_blank_second:
+                second_blank_pages_removed += 1
 
             pdf_name = _unique_name(Path(name).stem + ".pdf", used_names)
-            converted.append((pdf_name, pdf_bytes))
+            converted.append((pdf_name, pdf_payload))
             generated.unlink(missing_ok=True)
 
     details = {
@@ -176,7 +188,7 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
         "pdf_font": "Garamond",
         "garamond_exact": True,
         "garamond_family": garamond_family,
-        "blank_leading_pages_removed": total_blank_pages_removed,
+        "second_blank_pages_removed": second_blank_pages_removed,
     }
     if len(converted) == 1:
         return converted[0][0], converted[0][1], PDF_MIME, details

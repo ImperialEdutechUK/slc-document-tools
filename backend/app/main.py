@@ -31,7 +31,7 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.09.06-v4-garamond-only"
+BUILD_VERSION = "2026.09.09-v5-preview-pdf-workflow"
 
 app = FastAPI(title=APP_NAME, version="0.4.0")
 
@@ -165,17 +165,10 @@ async def format_document(
     auto_download_links: Annotated[bool, Form()] = True,
     cover_image: Annotated[UploadFile | None, File()] = None,
     images: Annotated[list[UploadFile] | None, File()] = None,
-    output_format: Annotated[str, Form()] = "docx",
     db: Session = Depends(get_db),
 ) -> JobResponse:
     if Path(document.filename or "").suffix.lower() != ".docx":
         raise HTTPException(status_code=400, detail="Upload a DOCX document to format.")
-
-    output_format = (output_format or "docx").strip().lower()
-    if output_format not in {"docx", "pdf"}:
-        raise HTTPException(
-            status_code=400, detail="output_format must be either 'docx' or 'pdf'."
-        )
 
     job = _new_job(db, "format", document.filename)
     try:
@@ -204,7 +197,14 @@ async def format_document(
         validation_text += _linked_report_text(linked_result)
 
         stem = _safe_stem(document.filename)
+        output_filename = f"{stem}_SLC_formatted.docx"
+        output_key = f"jobs/{job.id}/{output_filename}"
         report_key = f"jobs/{job.id}/{stem}_validation_report.txt"
+        storage.put_bytes(
+            output_key,
+            result_bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
         storage.put_bytes(report_key, validation_text.encode("utf-8"), "text/plain; charset=utf-8")
 
         details = {
@@ -219,35 +219,6 @@ async def format_document(
             },
             "linked_images": linked_result.to_dict(),
         }
-
-        if output_format == "pdf":
-            docx_filename = f"{stem}_SLC_formatted.docx"
-            try:
-                pdf_filename, pdf_bytes, pdf_content_type, pdf_details = convert_word_files(
-                    [(docx_filename, result_bytes)]
-                )
-            except WordToPdfError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-            output_filename = f"{stem}_SLC_formatted.pdf"
-            output_key = f"jobs/{job.id}/{output_filename}"
-            storage.put_bytes(output_key, pdf_bytes, pdf_content_type)
-            details["pdf"] = pdf_details
-            if pdf_details.get("blank_leading_pages_removed"):
-                log.append(
-                    "✔ Removed "
-                    f"{pdf_details['blank_leading_pages_removed']} blank leading "
-                    "page(s) from the converted PDF"
-                )
-        else:
-            output_filename = f"{stem}_SLC_formatted.docx"
-            output_key = f"jobs/{job.id}/{output_filename}"
-            storage.put_bytes(
-                output_key,
-                result_bytes,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
         job = _complete_job(
             db,
             job,
@@ -257,9 +228,6 @@ async def format_document(
             details=details,
         )
         return _job_response(job)
-    except HTTPException as exc:
-        _fail_job(db, job, exc)
-        raise
     except Exception as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -347,6 +315,66 @@ async def word_to_pdf(
     except Exception as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=500, detail="Word to PDF conversion failed.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/preview")
+def preview_formatted_job(job_id: str, db: Session = Depends(get_db)) -> Response:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Preview is available for formatted DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        output_filename, pdf_payload, content_type, _details = convert_word_files(
+            [(source_job.output_filename, source_payload)]
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WordToPdfError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return Response(
+        content=pdf_payload,
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{output_filename}"'},
+    )
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/convert-to-pdf", response_model=JobResponse)
+def convert_formatted_job_to_pdf(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="PDF conversion is available for formatted DOCX files only.")
+
+    conversion_job = _new_job(db, "formatted_word_to_pdf", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        output_filename, pdf_payload, content_type, details = convert_word_files(
+            [(source_job.output_filename, source_payload)]
+        )
+        details["build"] = BUILD_VERSION
+        details["source_format_job_id"] = source_job.id
+
+        output_key = f"jobs/{conversion_job.id}/{output_filename}"
+        storage.put_bytes(output_key, pdf_payload, content_type)
+        conversion_job = _complete_job(
+            db,
+            conversion_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(conversion_job)
+    except (StorageError, WordToPdfError) as exc:
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=500, detail="Formatted document PDF conversion failed.") from exc
 
 
 @app.post(f"{API_PREFIX}/pdf/page-count")
