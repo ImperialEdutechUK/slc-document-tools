@@ -81,6 +81,114 @@ def _insert_page_break_before(p_pr: ET.Element) -> None:
     p_pr.insert(insert_at, page_break_before)
 
 
+def collapse_excess_blank_paragraphs(
+    body: ET.Element,
+    *,
+    max_consecutive: int = 1,
+) -> int:
+    """Collapse long runs of empty paragraphs down to at most
+    ``max_consecutive`` in a row.
+
+    Uploaded source documents sometimes carry a long run of blank lines
+    (leftover spacer paragraphs from manual formatting) that has no visible
+    effect other than pushing a full extra blank page into the output. This
+    trims those runs while leaving a single blank paragraph in place so any
+    intentional spacing is preserved, and never touches a paragraph that
+    carries pagination-relevant properties (a manual page break, a section
+    break, list numbering, or an explicit page-break-before flag) since
+    those are never purely decorative.
+
+    ``bookmarkStart``/``bookmarkEnd`` markers are treated as transparent:
+    they neither count towards nor interrupt a run of blank paragraphs,
+    since Word commonly wraps headings in bookmarks and that should not
+    prevent the blank paragraphs around them from being collapsed.
+    """
+
+    def is_collapsible_blank(paragraph: ET.Element) -> bool:
+        if paragraph.tag != wt("p"):
+            return False
+        if _paragraph_text(paragraph):
+            return False
+        if paragraph.find(".//" + wt("drawing")) is not None:
+            return False
+        if paragraph.find(".//" + wt("pict")) is not None:
+            return False
+
+        p_pr = paragraph.find(wt("pPr"))
+        if p_pr is not None:
+            if p_pr.find(wt("sectPr")) is not None:
+                return False
+            if p_pr.find(wt("pageBreakBefore")) is not None:
+                return False
+            if p_pr.find(wt("numPr")) is not None:
+                return False
+        if paragraph.find(".//" + wt("br")) is not None:
+            return False
+
+        return True
+
+    removed = 0
+    run: list[ET.Element] = []
+
+    def flush() -> None:
+        nonlocal removed
+        for extra in run[max_consecutive:]:
+            body.remove(extra)
+            removed += 1
+        run.clear()
+
+    for child in list(body):
+        if child.tag in (wt("bookmarkStart"), wt("bookmarkEnd")):
+            continue
+        if is_collapsible_blank(child):
+            run.append(child)
+        else:
+            flush()
+    flush()
+
+    return removed
+
+
+def _headings_immediately_following_another_heading(
+    body: ET.Element,
+) -> set[ET.Element]:
+    """Identify heading paragraphs that come immediately after another
+    heading paragraph in the top-level document flow, with absolutely
+    nothing — not even a blank paragraph — between them.
+
+    These don't need a forced page break of their own: two heading titles
+    stacked directly on top of each other with nothing to read in between
+    just produces an orphan page holding a single line of text. A blank
+    paragraph in between is deliberately NOT treated as bridgeable here:
+    it usually signals the author's own intentional spacing/separation
+    between two unrelated sections (e.g. a title page followed by a
+    section heading), and collapsing across it would wrongly merge pages
+    that were meant to stay apart.
+    """
+    result: set[ET.Element] = set()
+    prev_heading: ET.Element | None = None
+
+    for child in list(body):
+        if child.tag in (wt("bookmarkStart"), wt("bookmarkEnd")):
+            # Transparent markers: Word commonly wraps headings in
+            # bookmarks, so these should not break true adjacency.
+            continue
+
+        if child.tag != wt("p"):
+            prev_heading = None
+            continue
+
+        is_heading = _is_heading_style(_paragraph_style(child))
+        if is_heading:
+            if prev_heading is not None:
+                result.add(child)
+            prev_heading = child
+        else:
+            prev_heading = None
+
+    return result
+
+
 def force_headings_to_new_pages(
     body: ET.Element,
     *,
@@ -111,6 +219,8 @@ def force_headings_to_new_pages(
         for child in list(parent)
     }
 
+    headings_after_headings = _headings_immediately_following_another_heading(body)
+
     governed = 0
     for paragraph in body.iter(wt("p")):
         if not _is_heading_style(_paragraph_style(paragraph)):
@@ -132,6 +242,14 @@ def force_headings_to_new_pages(
         if paragraph is first_heading_to_skip:
             # The generated page break after the TOC already starts this
             # heading on a new page.
+            continue
+
+        if paragraph in headings_after_headings:
+            # This heading immediately follows another heading with no body
+            # content in between (e.g. a section title immediately followed
+            # by its first sub-heading). Forcing a new page here would strand
+            # the previous heading alone on its own near-empty page, so let
+            # this one flow directly after it instead.
             continue
 
         _insert_page_break_before(_ensure_p_pr(paragraph))
