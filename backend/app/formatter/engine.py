@@ -12,7 +12,11 @@ import xml.etree.ElementTree as ET
 from docx import Document
 
 from .heading_styles import promote_manual_numbered_headings
-from .document_structure import force_headings_to_new_pages, make_toc_elements
+from .document_structure import (
+    collapse_excess_blank_paragraphs,
+    force_headings_to_new_pages,
+    make_toc_elements,
+)
 from .cover_layout import position_cover_background, position_cover_textboxes
 from .image_placement import build_validation_report, insert_numbered_images, prepare_image_catalog
 
@@ -822,6 +826,13 @@ def process(
         if headings_fixed:
             log.append(
                 f"✔ Heading levels and formatting normalised for {headings_fixed} headings"
+            )
+
+        blanks_collapsed = collapse_excess_blank_paragraphs(out_body)
+        if blanks_collapsed:
+            log.append(
+                f"✔ Collapsed {blanks_collapsed} redundant blank paragraph(s) "
+                "that were pushing extra near-empty pages into the output"
             )
 
         headings_on_new_pages = force_headings_to_new_pages(
