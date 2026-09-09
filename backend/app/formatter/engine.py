@@ -606,6 +606,67 @@ def _paragraph_has_manual_page_break(para):
     return False
 
 
+def _paragraph_is_toc_heading(para):
+    pPr = para.find(wt("pPr"))
+    pStyle = pPr.find(wt("pStyle")) if pPr is not None else None
+    style_val = pStyle.get(wt("val"), "") if pStyle is not None else ""
+    txt = para_text(para)
+    return style_val == "TOCHeading" or txt.strip().lower() == "table of contents"
+
+
+def strip_uploaded_front_matter(out_body):
+    """Remove the uploaded document's own cover/title block when it has no
+    explicit page or section break to mark where it ends.
+
+    Many source documents don't use a manual page break at all for their
+    title page — they just rely on Word's natural pagination across a run
+    of blank paragraphs (a title line, the unit code, some empty lines,
+    then real content). strip_uploaded_first_page() can't find a boundary
+    in that case and correctly does nothing.
+
+    However, these same documents typically do carry their own
+    Word-generated "Automatic Table of Contents" (or at least a
+    TOCHeading-styled paragraph) immediately after that title block and
+    before the real unit content. That TOC is a reliable, content-safe
+    boundary: everything before it is the author's own cover/title
+    material, which would otherwise survive untouched and end up as a
+    duplicate, near-blank page sitting behind the SLC-generated cover.
+
+    This removes every paragraph before the first such TOC marker (the TOC
+    block itself is left in place — remove_toc_from_document() removes it
+    later in the pipeline). If no TOC marker is found before real content
+    starts, nothing is removed: as with strip_uploaded_first_page(), an
+    unclear boundary is a reason to leave the content alone, not to guess.
+    """
+    to_remove = []
+    found_toc = False
+
+    for elem in list(out_body):
+        if elem.tag == wt("sdt"):
+            if _sdt_is_toc_block(elem):
+                found_toc = True
+                break
+            to_remove.append(elem)
+            continue
+
+        if elem.tag == wt("p"):
+            if _paragraph_is_toc_heading(elem):
+                found_toc = True
+                break
+            to_remove.append(elem)
+            continue
+
+        to_remove.append(elem)
+
+    if not found_toc:
+        return 0
+
+    for elem in to_remove:
+        out_body.remove(elem)
+
+    return len(to_remove)
+
+
 def strip_uploaded_first_page(out_body):
     """Remove the user-uploaded document's own first page.
 
@@ -728,12 +789,19 @@ def process(
         out_body = out_tree.getroot().find(wt("body"))
         tmpl_paras = list(tmpl_body)
 
-        stripped_first_page = strip_uploaded_first_page(out_body)
+        stripped_first_page = strip_uploaded_front_matter(out_body)
         if stripped_first_page:
             log.append(
-                f"✔ Removed the uploaded document's own first page "
-                f"({stripped_first_page} paragraph(s)) before inserting the SLC cover"
+                f"✔ Removed the uploaded document's own cover/title block "
+                f"before its Table of Contents ({stripped_first_page} paragraph(s))"
             )
+        else:
+            stripped_first_page = strip_uploaded_first_page(out_body)
+            if stripped_first_page:
+                log.append(
+                    f"✔ Removed the uploaded document's own first page "
+                    f"({stripped_first_page} paragraph(s)) before inserting the SLC cover"
+                )
 
         rels_path = os.path.join(out, "word", "_rels", "document.xml.rels")
         rels_tree = ET.parse(rels_path)
