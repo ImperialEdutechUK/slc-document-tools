@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
 from .formatter.engine import process
 from .formatter.pdf_editing import PdfEditingError, get_pdf_page_count, remove_pdf_pages
+from .formatter.simple_editing import SimpleEditingError, apply_simple_edits, get_editable_paragraphs
 from .models import Job
-from .schemas import JobResponse
+from .schemas import JobResponse, SimpleEditRequest
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, storage
@@ -31,7 +32,7 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.09.09-v5-preview-pdf-workflow"
+BUILD_VERSION = "2026.09.09-v6-simple-format-editor"
 
 app = FastAPI(title=APP_NAME, version="0.4.0")
 
@@ -340,6 +341,82 @@ def preview_formatted_job(job_id: str, db: Session = Depends(get_db)) -> Respons
         media_type=content_type,
         headers={"Content-Disposition": f'inline; filename="{output_filename}"'},
     )
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/editable-paragraphs")
+def editable_paragraphs(job_id: str, db: Session = Depends(get_db)) -> dict:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Simple editing is available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        paragraphs = get_editable_paragraphs(source_payload)
+        return {"job_id": source_job.id, "paragraphs": paragraphs}
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/simple-edit", response_model=JobResponse)
+def simple_edit_formatted_job(
+    job_id: str,
+    request: SimpleEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Simple editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "simple_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = apply_simple_edits(
+            source_payload, request.paragraph_indices, request.action
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["simple_edit"] = {
+            "action": request.action,
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except (StorageError, SimpleEditingError) as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Simple document editing failed.") from exc
 
 
 @app.post(f"{API_PREFIX}/jobs/{{job_id}}/convert-to-pdf", response_model=JobResponse)

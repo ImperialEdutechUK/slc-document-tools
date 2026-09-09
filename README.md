@@ -16,6 +16,8 @@ The original formatting engine has been extracted from Streamlit and reused by F
 
 - SLC cover/template application.
 - Heading correction and page-start rules.
+- Clean paragraph pagination: paragraphs stay together where possible and headings stay with following content.
+- Reference/resource headings such as `Resources for Further Reference:` are converted to bullet lists automatically.
 - Automatic TOC generation.
 - Footer/page numbering.
 - Existing numbered-image insertion and validation.
@@ -45,6 +47,17 @@ New linked-image automation is included:
 4. Route Freepik links through a server-side API key when configured.
 5. Give manual uploads priority for the same image number.
 6. Add linked-image successes/failures to the validation report without stopping the rest of the document.
+
+### Preview, simple editing and PDF export
+
+After formatting a single DOCX, the user can stay in the formatter screen to:
+
+- Preview the formatted document.
+- Open a lightweight formatting editor.
+- Select paragraphs and switch between bullets, numbering and normal text.
+- Force selected paragraphs to the next page or return them to normal page flow.
+- Convert the current edited DOCX directly to PDF.
+- Automatically remove an unwanted blank second PDF page when detected.
 
 ### Word → PDF
 
@@ -124,7 +137,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.09.06-v4-garamond-only`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.09.09-v6-simple-format-editor`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -158,6 +171,10 @@ Direct public image URLs work independently of the stock API.
 POST /api/v1/formatter/format
 POST /api/v1/formatter/batch
 POST /api/v1/word-to-pdf
+GET  /api/v1/jobs/{job_id}/preview
+GET  /api/v1/jobs/{job_id}/editable-paragraphs
+POST /api/v1/jobs/{job_id}/simple-edit
+POST /api/v1/jobs/{job_id}/convert-to-pdf
 POST /api/v1/pdf/page-count
 POST /api/v1/pdf/remove-pages
 GET  /api/v1/jobs/{job_id}
@@ -172,7 +189,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **48 passing tests**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
+The backend currently has **54 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
 
 ## Next implementation step
 

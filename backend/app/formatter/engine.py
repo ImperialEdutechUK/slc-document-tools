@@ -4,6 +4,7 @@ import base64
 import copy
 import io
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -13,6 +14,7 @@ from docx import Document
 
 from .heading_styles import promote_manual_numbered_headings
 from .document_structure import (
+    apply_clean_pagination,
     collapse_excess_blank_paragraphs,
     collect_toc_entries_and_bookmark_headings,
     force_headings_to_new_pages,
@@ -390,6 +392,56 @@ def remove_toc_from_document(out_body):
     return removed
 
 def add_bullets_to_references(out_body):
+    """Convert common reference/resource sections to bullet lists.
+
+    Source documents use several heading variants rather than one fixed
+    ``References`` label. Recognising those variants here means a heading such
+    as ``Resources for Further Reference:`` is formatted correctly without a
+    manual clean-up step.
+    """
+
+    reference_headings = {
+        "references",
+        "reference list",
+        "bibliography",
+        "further reading",
+        "resources for further reference",
+        "resources for further references",
+        "resources and further reading",
+    }
+
+    def normalise_heading(text):
+        value = re.sub(r"\s+", " ", (text or "").strip().lower())
+        return value.rstrip(" :;-")
+
+    def strip_manual_number_prefix(paragraph):
+        # Automatic Word numbering is stored in w:numPr rather than the text
+        # itself. Some uploaded documents, however, contain a literal ``1. ``
+        # prefix. Remove that prefix from the first visible text node so a
+        # bullet conversion never produces ``• 1. Reference...``.
+        text_nodes = list(paragraph.iter(wt("t")))
+        for index, node in enumerate(text_nodes):
+            original = node.text or ""
+            if not original.strip():
+                continue
+
+            match = re.match(r"^(\s*)\d{1,3}[.)]\s+(.*)$", original)
+            if match:
+                node.text = match.group(1) + match.group(2)
+                return True
+
+            # A number can occasionally occupy its own run, e.g. ``1.`` in
+            # one text node and the reference in the next.
+            if re.match(r"^\s*\d{1,3}[.)]\s*$", original):
+                node.text = ""
+                if index + 1 < len(text_nodes):
+                    next_node = text_nodes[index + 1]
+                    if next_node.text:
+                        next_node.text = next_node.text.lstrip()
+                return True
+            return False
+        return False
+
     in_refs = False
     changed = 0
 
@@ -402,21 +454,23 @@ def add_bullets_to_references(out_body):
         pStyle = pPr.find(wt("pStyle")) if pPr is not None else None
         style_val = pStyle.get(wt("val"), "") if pStyle is not None else ""
 
-        if txt == "References":
+        if normalise_heading(txt) in reference_headings:
             in_refs = True
             continue
 
         if not in_refs:
             continue
 
-        if style_val.startswith("Heading") or style_val == "TOC-Heading":
+        if style_val.startswith("Heading") or style_val in {"TOC-Heading", "TOCHeading"}:
             break
 
         if not txt:
             continue
 
+        strip_manual_number_prefix(para)
         pPr = ensure_pPr(para)
 
+        pStyle = pPr.find(wt("pStyle"))
         if pStyle is None:
             pStyle = ET.Element(wt("pStyle"))
             pPr.insert(0, pStyle)
@@ -431,7 +485,12 @@ def add_bullets_to_references(out_body):
         ET.SubElement(numPr, wt("ilvl")).set(wt("val"), "0")
         ET.SubElement(numPr, wt("numId")).set(wt("val"), "12")
 
-        insert_at = 1 if len(pPr) else 0
+        # Keep numbering after the style/pagination controls but before
+        # spacing/indentation properties.
+        insert_at = 0
+        for index, child in enumerate(list(pPr)):
+            if child.tag in {wt("pStyle"), wt("keepNext"), wt("keepLines"), wt("pageBreakBefore"), wt("widowControl")} :
+                insert_at = index + 1
         pPr.insert(insert_at, numPr)
         changed += 1
 
@@ -961,6 +1020,13 @@ def process(
             log.append(
                 f"✔ Collapsed {blanks_collapsed} redundant blank paragraph(s) "
                 "that were pushing extra near-empty pages into the output"
+            )
+
+        pagination_fixed = apply_clean_pagination(out_body)
+        if pagination_fixed:
+            log.append(
+                "✔ Clean pagination controls applied to "
+                f"{pagination_fixed} paragraph(s) so body text stays together where possible"
             )
 
         headings_on_new_pages = force_headings_to_new_pages(

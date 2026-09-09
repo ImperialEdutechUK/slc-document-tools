@@ -24,6 +24,15 @@ type JobResponse = {
   error_message?: string | null;
 };
 
+type EditableParagraph = {
+  index: number;
+  text: string;
+  style: string;
+  list_type: "bullet" | "number" | "none";
+  page_break_before: boolean;
+  keep_together: boolean;
+};
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
 ).replace(/\/$/, "");
@@ -281,11 +290,18 @@ function FormatterPanel() {
   const [busy, setBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [editorBusy, setEditorBusy] = useState(false);
+  const [editApplyBusy, setEditApplyBusy] = useState(false);
 
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
   const [pdfJob, setPdfJob] = useState<JobResponse | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editableParagraphs, setEditableParagraphs] = useState<EditableParagraph[]>([]);
+  const [selectedParagraphs, setSelectedParagraphs] = useState<number[]>([]);
+  const [editorSearch, setEditorSearch] = useState("");
+  const [editMessage, setEditMessage] = useState("");
 
   const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
 
@@ -300,6 +316,11 @@ function FormatterPanel() {
   function resetPostFormatWorkflow() {
     setPdfJob(null);
     setError("");
+    setEditorOpen(false);
+    setEditableParagraphs([]);
+    setSelectedParagraphs([]);
+    setEditorSearch("");
+    setEditMessage("");
     setPreviewUrl((current) => {
       if (current) {
         URL.revokeObjectURL(current);
@@ -360,15 +381,13 @@ function FormatterPanel() {
     }
   }
 
-  async function previewFormattedDocument() {
-    if (!job || batchMode) return;
-
+  async function generatePreview(jobId: string) {
     setPreviewBusy(true);
     setError("");
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/v1/jobs/${job.id}/preview`,
+        `${API_BASE}/api/v1/jobs/${jobId}/preview`,
         { method: "GET" }
       );
 
@@ -398,6 +417,100 @@ function FormatterPanel() {
     }
   }
 
+  async function previewFormattedDocument() {
+    if (!job || batchMode) return;
+    await generatePreview(job.id);
+  }
+
+  async function loadEditableParagraphs(jobId: string) {
+    setEditorBusy(true);
+    setError("");
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${jobId}/editable-paragraphs`,
+        { method: "GET" }
+      );
+      setEditableParagraphs(result.paragraphs || []);
+      setSelectedParagraphs([]);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The simple formatting editor could not be loaded."
+      );
+    } finally {
+      setEditorBusy(false);
+    }
+  }
+
+  async function toggleSimpleEditor() {
+    if (!job || batchMode) return;
+
+    if (editorOpen) {
+      setEditorOpen(false);
+      return;
+    }
+
+    setEditorOpen(true);
+    setEditMessage("");
+    await loadEditableParagraphs(job.id);
+  }
+
+  function toggleParagraphSelection(index: number) {
+    setSelectedParagraphs((current) =>
+      current.includes(index)
+        ? current.filter((item) => item !== index)
+        : [...current, index]
+    );
+  }
+
+  async function applySimpleEdit(
+    action:
+      | "bullets"
+      | "numbering"
+      | "normal"
+      | "page_break_before"
+      | "remove_page_break_before"
+  ) {
+    if (!job || selectedParagraphs.length === 0) {
+      setError("Select at least one paragraph to edit.");
+      return;
+    }
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/simple-edit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paragraph_indices: selectedParagraphs,
+            action,
+          }),
+        }
+      );
+
+      setJob(result);
+      setEditMessage(
+        `${result.details?.simple_edit?.paragraphs_changed ?? selectedParagraphs.length} paragraph(s) updated.`
+      );
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "The formatting edit failed."
+      );
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
   async function convertFormattedDocumentToPdf() {
     if (!job || batchMode) return;
 
@@ -424,6 +537,36 @@ function FormatterPanel() {
   const linked = job?.details?.linked_images;
   const batchDetails = batchMode ? job?.details : null;
 
+  const filteredEditableParagraphs = useMemo(() => {
+    const query = editorSearch.trim().toLowerCase();
+    if (!query) return editableParagraphs;
+    return editableParagraphs.filter((paragraph) =>
+      `${paragraph.text} ${paragraph.style} ${paragraph.list_type}`
+        .toLowerCase()
+        .includes(query)
+    );
+  }, [editableParagraphs, editorSearch]);
+
+  const allVisibleParagraphsSelected =
+    filteredEditableParagraphs.length > 0 &&
+    filteredEditableParagraphs.every((paragraph) =>
+      selectedParagraphs.includes(paragraph.index)
+    );
+
+  function toggleAllVisibleParagraphs() {
+    const visible = filteredEditableParagraphs.map((paragraph) => paragraph.index);
+    if (allVisibleParagraphsSelected) {
+      setSelectedParagraphs((current) =>
+        current.filter((index) => !visible.includes(index))
+      );
+      return;
+    }
+
+    setSelectedParagraphs((current) =>
+      Array.from(new Set([...current, ...visible]))
+    );
+  }
+
   return (
     <form onSubmit={submit} className="panel-stack">
       <section className="hero compact">
@@ -431,8 +574,8 @@ function FormatterPanel() {
           <span className="eyebrow">SLC Document Workflow</span>
           <h2>Document Formatter</h2>
           <p>
-            Format your document, preview the completed result and convert it
-            to PDF without moving between separate tabs.
+            Format your document, preview and make simple formatting edits,
+            then convert it to PDF without moving between separate tabs.
           </p>
         </div>
 
@@ -666,10 +809,10 @@ function FormatterPanel() {
                   <span>04</span>
 
                   <div>
-                    <h3>Preview and export</h3>
+                    <h3>Preview, edit and export</h3>
                     <p>
-                      Review the formatted document here, then convert the same
-                      formatted file directly to PDF.
+                      Review the formatted document, make simple formatting
+                      adjustments if needed, then convert the same file to PDF.
                     </p>
                   </div>
                 </div>
@@ -678,21 +821,177 @@ function FormatterPanel() {
                   <button
                     className="button secondary"
                     type="button"
-                    disabled={previewBusy || pdfBusy}
+                    disabled={previewBusy || pdfBusy || editApplyBusy}
                     onClick={previewFormattedDocument}
                   >
                     {previewBusy ? "Generating preview…" : "Preview"}
                   </button>
 
                   <button
+                    className="button secondary"
+                    type="button"
+                    disabled={previewBusy || pdfBusy || editApplyBusy}
+                    onClick={toggleSimpleEditor}
+                  >
+                    {editorOpen ? "Close editor" : "Edit formatting"}
+                  </button>
+
+                  <button
                     className="button primary"
                     type="button"
-                    disabled={pdfBusy || previewBusy}
+                    disabled={pdfBusy || previewBusy || editApplyBusy}
                     onClick={convertFormattedDocumentToPdf}
                   >
                     {pdfBusy ? "Converting to PDF…" : "Convert to PDF"}
                   </button>
                 </div>
+
+                {editorOpen && (
+                  <section className="simple-editor">
+                    <div className="simple-editor-heading">
+                      <div>
+                        <h4>Simple formatting editor</h4>
+                        <p>
+                          Select one or more paragraphs, then apply a simple
+                          formatting change. The preview refreshes automatically
+                          after each edit.
+                        </p>
+                      </div>
+
+                      <span className="selection-count">
+                        {selectedParagraphs.length} selected
+                      </span>
+                    </div>
+
+                    <div className="editor-toolbar">
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={editApplyBusy || selectedParagraphs.length === 0}
+                        onClick={() => applySimpleEdit("bullets")}
+                      >
+                        • Bullets
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={editApplyBusy || selectedParagraphs.length === 0}
+                        onClick={() => applySimpleEdit("numbering")}
+                      >
+                        1. Numbering
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={editApplyBusy || selectedParagraphs.length === 0}
+                        onClick={() => applySimpleEdit("normal")}
+                      >
+                        Normal text
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={editApplyBusy || selectedParagraphs.length === 0}
+                        onClick={() => applySimpleEdit("page_break_before")}
+                      >
+                        Move to next page
+                      </button>
+
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={editApplyBusy || selectedParagraphs.length === 0}
+                        onClick={() => applySimpleEdit("remove_page_break_before")}
+                      >
+                        Normal page flow
+                      </button>
+                    </div>
+
+                    <div className="editor-filter-row">
+                      <input
+                        value={editorSearch}
+                        onChange={(event) => setEditorSearch(event.target.value)}
+                        placeholder="Find a paragraph or heading…"
+                        aria-label="Find a paragraph or heading"
+                      />
+
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={filteredEditableParagraphs.length === 0}
+                        onClick={toggleAllVisibleParagraphs}
+                      >
+                        {allVisibleParagraphsSelected
+                          ? "Clear shown"
+                          : "Select shown"}
+                      </button>
+                    </div>
+
+                    {editMessage && (
+                      <div className="success-box compact-success">
+                        {editMessage}
+                      </div>
+                    )}
+
+                    {editorBusy ? (
+                      <div className="editor-loading">Loading paragraphs…</div>
+                    ) : (
+                      <div className="editable-paragraph-list">
+                        {filteredEditableParagraphs.map((paragraph) => {
+                          const selected = selectedParagraphs.includes(
+                            paragraph.index
+                          );
+
+                          return (
+                            <label
+                              className={`editable-paragraph ${
+                                selected ? "selected" : ""
+                              }`}
+                              key={paragraph.index}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() =>
+                                  toggleParagraphSelection(paragraph.index)
+                                }
+                              />
+
+                              <span className="editable-paragraph-content">
+                                <span className="paragraph-badges">
+                                  <span>{paragraph.style}</span>
+                                  {paragraph.list_type !== "none" && (
+                                    <span>{
+                                      paragraph.list_type === "bullet"
+                                        ? "Bullets"
+                                        : "Numbered"
+                                    }</span>
+                                  )}
+                                  {paragraph.page_break_before && (
+                                    <span>Starts new page</span>
+                                  )}
+                                </span>
+
+                                <span className="paragraph-text">
+                                  {paragraph.text}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+
+                        {filteredEditableParagraphs.length === 0 && (
+                          <div className="editor-empty">
+                            No matching editable paragraphs were found.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </section>
+                )}
 
                 {previewUrl && (
                   <div className="preview-shell">

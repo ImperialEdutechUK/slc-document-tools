@@ -19,3 +19,8 @@ class JobResponse(BaseModel):
     error_message: str | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+class SimpleEditRequest(BaseModel):
+    paragraph_indices: list[int] = Field(default_factory=list)
+    action: str

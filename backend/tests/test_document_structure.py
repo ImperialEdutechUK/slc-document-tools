@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 
 from app.formatter.document_structure import (
     WNS,
+    apply_clean_pagination,
     force_headings_to_new_pages,
     make_toc_elements,
     wt,
@@ -65,6 +66,20 @@ class DocumentStructureTests(unittest.TestCase):
         self.assertIsNotNone(
             heading.find("./" + wt("pPr") + "/" + wt("pageBreakBefore"))
         )
+
+    def test_clean_pagination_keeps_body_paragraph_together_and_heading_with_next(self):
+        body = ET.Element(wt("body"))
+        heading = make_paragraph("Heading", "Heading1")
+        body_text = make_paragraph("A body paragraph that should stay together.")
+        body.extend([heading, body_text])
+
+        changed = apply_clean_pagination(body)
+
+        self.assertEqual(changed, 2)
+        self.assertIsNotNone(heading.find("./" + wt("pPr") + "/" + wt("keepNext")))
+        self.assertIsNotNone(heading.find("./" + wt("pPr") + "/" + wt("keepLines")))
+        self.assertIsNotNone(body_text.find("./" + wt("pPr") + "/" + wt("keepLines")))
+        self.assertIsNotNone(body_text.find("./" + wt("pPr") + "/" + wt("widowControl")))
 
     def test_text_box_heading_is_ignored(self):
         body = ET.Element(wt("body"))

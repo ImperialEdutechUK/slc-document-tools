@@ -257,6 +257,83 @@ def force_headings_to_new_pages(
     return governed
 
 
+def apply_clean_pagination(body: ET.Element) -> int:
+    """Apply conservative pagination controls to visible body paragraphs.
+
+    ``keepLines`` asks Word/LibreOffice to move a paragraph to the next page
+    when it cannot fit cleanly in the remaining space instead of splitting it
+    across pages. ``widowControl`` avoids single orphan lines. Headings also
+    receive ``keepNext`` so a heading is not stranded at the bottom of a page
+    without the paragraph that follows it.
+
+    Text inside drawing/text boxes is deliberately ignored because it belongs
+    to positioned artwork such as the generated cover rather than normal page
+    flow.
+    """
+
+    parent_map = {
+        child: parent
+        for parent in body.iter()
+        for child in list(parent)
+    }
+
+    def ensure_control(p_pr: ET.Element, tag: str) -> bool:
+        element = p_pr.find(wt(tag))
+        changed_here = False
+        if element is None:
+            element = ET.Element(wt(tag))
+            changed_here = True
+        else:
+            # Reinsert pagination controls in schema-friendly order.
+            p_pr.remove(element)
+
+        element.set(wt("val"), "1")
+
+        allowed_before = {wt("pStyle")}
+        if tag in {"keepLines", "pageBreakBefore", "widowControl"}:
+            allowed_before.add(wt("keepNext"))
+        if tag in {"pageBreakBefore", "widowControl"}:
+            allowed_before.add(wt("keepLines"))
+        if tag == "widowControl":
+            allowed_before.update({wt("pageBreakBefore"), wt("framePr")})
+
+        insert_at = 0
+        for index, child in enumerate(list(p_pr)):
+            if child.tag in allowed_before:
+                insert_at = index + 1
+        p_pr.insert(insert_at, element)
+        return changed_here
+
+    changed = 0
+    for paragraph in body.iter(wt("p")):
+        if not _paragraph_text(paragraph):
+            continue
+
+        ancestor = parent_map.get(paragraph)
+        inside_text_box = False
+        while ancestor is not None and ancestor is not body:
+            if ancestor.tag == wt("txbxContent"):
+                inside_text_box = True
+                break
+            ancestor = parent_map.get(ancestor)
+        if inside_text_box:
+            continue
+
+        p_pr = _ensure_p_pr(paragraph)
+        paragraph_changed = False
+
+        if _is_heading_style(_paragraph_style(paragraph)):
+            paragraph_changed = ensure_control(p_pr, "keepNext") or paragraph_changed
+
+        paragraph_changed = ensure_control(p_pr, "keepLines") or paragraph_changed
+        paragraph_changed = ensure_control(p_pr, "widowControl") or paragraph_changed
+
+        if paragraph_changed:
+            changed += 1
+
+    return changed
+
+
 def make_page_break_paragraph() -> ET.Element:
     paragraph = ET.Element(wt("p"))
     run = ET.SubElement(paragraph, wt("r"))
