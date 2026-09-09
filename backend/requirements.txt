@@ -9,3 +9,4 @@ SQLAlchemy==2.0.43
 psycopg2-binary==2.9.10
 boto3==1.40.15
 python-dotenv==1.1.1
+reportlab==4.4.10

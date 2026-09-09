@@ -12,6 +12,83 @@ class PdfEditingError(ValueError):
     """Raised when a PDF cannot be safely processed."""
 
 
+def _page_is_blank(page) -> bool:
+    """Best-effort check for whether a PDF page has no visible content.
+
+    A page counts as blank when it has no extractable text and no image
+    (XObject) resources. This intentionally does not try to detect vector
+    drawings/shapes with no text or images, since a genuinely blank page
+    produced as a stray artifact of DOCX-to-PDF conversion has neither.
+    """
+    try:
+        text = (page.extract_text() or "").strip()
+    except Exception:
+        text = ""
+    if text:
+        return False
+
+    try:
+        resources = page.get("/Resources", {}) or {}
+        if "/XObject" in resources:
+            return False
+    except Exception:
+        # If resources can't be read, don't guess — treat as non-blank so a
+        # page is never removed on uncertain grounds.
+        return False
+
+    return True
+
+
+def strip_leading_blank_pages(
+    pdf_bytes: bytes,
+    *,
+    max_pages_to_check: int = 3,
+) -> tuple[bytes, int]:
+    """Remove blank pages found at the very start of a PDF, automatically.
+
+    Only leading pages are ever considered — a blank page later in the
+    document (which may be an intentional spacer, e.g. before a
+    right-hand-starting section) is left untouched. Checks at most
+    ``max_pages_to_check`` pages from the start, and always leaves at
+    least one page in the document even if every checked page reads as
+    blank, so a false-positive detection can never produce an empty PDF.
+
+    Returns the (possibly unchanged) PDF bytes and how many leading pages
+    were removed.
+    """
+    page_count = get_pdf_page_count(pdf_bytes)
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    blank_leading_count = 0
+    limit = min(max_pages_to_check, page_count - 1)
+    for index in range(limit):
+        if _page_is_blank(reader.pages[index]):
+            blank_leading_count += 1
+        else:
+            break
+
+    if blank_leading_count == 0:
+        return pdf_bytes, 0
+
+    writer = PdfWriter()
+    for page_number, page in enumerate(reader.pages):
+        if page_number >= blank_leading_count:
+            writer.add_page(page)
+
+    if reader.metadata:
+        metadata = {
+            str(key): str(value)
+            for key, value in reader.metadata.items()
+            if key and value is not None
+        }
+        if metadata:
+            writer.add_metadata(metadata)
+
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue(), blank_leading_count
+
+
 def get_pdf_page_count(pdf_bytes: bytes) -> int:
     """Return the number of pages in a readable, unencrypted PDF."""
     if not pdf_bytes:

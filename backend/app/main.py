@@ -165,10 +165,17 @@ async def format_document(
     auto_download_links: Annotated[bool, Form()] = True,
     cover_image: Annotated[UploadFile | None, File()] = None,
     images: Annotated[list[UploadFile] | None, File()] = None,
+    output_format: Annotated[str, Form()] = "docx",
     db: Session = Depends(get_db),
 ) -> JobResponse:
     if Path(document.filename or "").suffix.lower() != ".docx":
         raise HTTPException(status_code=400, detail="Upload a DOCX document to format.")
+
+    output_format = (output_format or "docx").strip().lower()
+    if output_format not in {"docx", "pdf"}:
+        raise HTTPException(
+            status_code=400, detail="output_format must be either 'docx' or 'pdf'."
+        )
 
     job = _new_job(db, "format", document.filename)
     try:
@@ -197,14 +204,7 @@ async def format_document(
         validation_text += _linked_report_text(linked_result)
 
         stem = _safe_stem(document.filename)
-        output_filename = f"{stem}_SLC_formatted.docx"
-        output_key = f"jobs/{job.id}/{output_filename}"
         report_key = f"jobs/{job.id}/{stem}_validation_report.txt"
-        storage.put_bytes(
-            output_key,
-            result_bytes,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
         storage.put_bytes(report_key, validation_text.encode("utf-8"), "text/plain; charset=utf-8")
 
         details = {
@@ -219,6 +219,35 @@ async def format_document(
             },
             "linked_images": linked_result.to_dict(),
         }
+
+        if output_format == "pdf":
+            docx_filename = f"{stem}_SLC_formatted.docx"
+            try:
+                pdf_filename, pdf_bytes, pdf_content_type, pdf_details = convert_word_files(
+                    [(docx_filename, result_bytes)]
+                )
+            except WordToPdfError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+            output_filename = f"{stem}_SLC_formatted.pdf"
+            output_key = f"jobs/{job.id}/{output_filename}"
+            storage.put_bytes(output_key, pdf_bytes, pdf_content_type)
+            details["pdf"] = pdf_details
+            if pdf_details.get("blank_leading_pages_removed"):
+                log.append(
+                    "✔ Removed "
+                    f"{pdf_details['blank_leading_pages_removed']} blank leading "
+                    "page(s) from the converted PDF"
+                )
+        else:
+            output_filename = f"{stem}_SLC_formatted.docx"
+            output_key = f"jobs/{job.id}/{output_filename}"
+            storage.put_bytes(
+                output_key,
+                result_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
         job = _complete_job(
             db,
             job,
@@ -228,6 +257,9 @@ async def format_document(
             details=details,
         )
         return _job_response(job)
+    except HTTPException as exc:
+        _fail_job(db, job, exc)
+        raise
     except Exception as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc

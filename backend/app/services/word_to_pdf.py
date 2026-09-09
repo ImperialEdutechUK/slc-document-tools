@@ -8,6 +8,7 @@ import tempfile
 import zipfile
 
 from .zip_utils import safe_zip_member
+from ..formatter.pdf_editing import strip_leading_blank_pages
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -118,6 +119,7 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
 
     converted: list[tuple[str, bytes]] = []
     used_names: set[str] = set()
+    total_blank_pages_removed = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         input_dir = Path(tmp) / "input"
@@ -161,8 +163,11 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
             if not generated.exists():
                 raise WordToPdfError(f"LibreOffice did not produce a PDF for {name}.")
 
+            pdf_bytes, blanks_removed = strip_leading_blank_pages(generated.read_bytes())
+            total_blank_pages_removed += blanks_removed
+
             pdf_name = _unique_name(Path(name).stem + ".pdf", used_names)
-            converted.append((pdf_name, generated.read_bytes()))
+            converted.append((pdf_name, pdf_bytes))
             generated.unlink(missing_ok=True)
 
     details = {
@@ -171,6 +176,7 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
         "pdf_font": "Garamond",
         "garamond_exact": True,
         "garamond_family": garamond_family,
+        "blank_leading_pages_removed": total_blank_pages_removed,
     }
     if len(converted) == 1:
         return converted[0][0], converted[0][1], PDF_MIME, details
