@@ -433,18 +433,23 @@ def add_bullets_to_references(out_body):
     return changed
 
       # A4 page (11906 twips wide) with 1440-twip (1") margins on each side,
-      # matching set_a4_on_all_sections(). The footer tab stops MUST be
-      # derived from this usable width rather than hardcoded: the previous
-      # constants (4680/9360) were sized for US Letter (12240 twips wide),
-      # where 9360 = 12240 - 2*1440 lines up exactly with the right margin.
-      # On this A4 document the usable width is only 9026 twips, so a tab
-      # stop fixed at 9360 sits ~334 twips past the true right margin and
-      # causes the page-number field to collide with the trailing "| Page"
-      # text instead of reading cleanly as "N | Page".
+      # matching set_a4_on_all_sections(). The footer's three zones (page
+      # number, course name, copyright) are laid out with a borderless
+      # 3-column table rather than tab stops. A center-tab immediately
+      # followed by a right-tab in the same paragraph was tried first and
+      # looked correct on paper (the tab position math is exactly right for
+      # this page geometry), but it reliably glues the second and third
+      # segments together with no gap in practice — reproduced consistently
+      # under LibreOffice regardless of the tab positions or the length of
+      # the course-name text, so this is a rendering-engine limitation with
+      # chaining two different tab-alignment types, not a value that can be
+      # tuned away. A table has no tab-stop resolution involved at all, so
+      # each zone renders deterministically.
 FOOTER_PAGE_WIDTH_TWIPS = 11906
 FOOTER_PAGE_MARGIN_TWIPS = 1440
-FOOTER_RIGHT_TAB_TWIPS = FOOTER_PAGE_WIDTH_TWIPS - (2 * FOOTER_PAGE_MARGIN_TWIPS)
-FOOTER_CENTER_TAB_TWIPS = FOOTER_RIGHT_TAB_TWIPS // 2
+FOOTER_CONTENT_WIDTH_TWIPS = FOOTER_PAGE_WIDTH_TWIPS - (2 * FOOTER_PAGE_MARGIN_TWIPS)
+FOOTER_OUTER_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS * 3 // 10
+FOOTER_CENTER_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS - (2 * FOOTER_OUTER_COL_TWIPS)
 
 def make_footer_xml(course_name, page_on_right):
     page_field = (
@@ -459,20 +464,66 @@ def make_footer_xml(course_name, page_on_right):
     cn = course_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     slc = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>© South London College Ltd</w:t></w:r>'
     crs = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve">' + cn + '</w:t></w:r>'
-    tab = '<w:r><w:tab/></w:r>'
 
-    body = (slc + tab + crs + tab + page_field + sep) if page_on_right else (page_field + sep + tab + crs + tab + slc)
+    page_cell_content = page_field + sep
+    slc_cell_content = slc
+    crs_cell_content = crs
+
+    def cell(width, align, content, top_border=False):
+        border_xml = (
+            '<w:tcBorders><w:top w:val="single" w:sz="24" w:space="0" w:color="1A99A0"/></w:tcBorders>'
+            if top_border else ""
+        )
+        return (
+            '<w:tc><w:tcPr><w:tcW w:w="' + str(width) + '" w:type="dxa"/>'
+            + border_xml +
+            '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="0" w:type="dxa"/>'
+            '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar>'
+            '<w:vAlign w:val="center"/></w:tcPr>'
+            '<w:p><w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="' + align + '"/></w:pPr>'
+            + content + '</w:p></w:tc>'
+        )
+
+    if page_on_right:
+        cells = (
+            cell(FOOTER_OUTER_COL_TWIPS, "left", slc_cell_content, top_border=True)
+            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True)
+            + cell(FOOTER_OUTER_COL_TWIPS, "right", page_cell_content, top_border=True)
+        )
+    else:
+        cells = (
+            cell(FOOTER_OUTER_COL_TWIPS, "left", page_cell_content, top_border=True)
+            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True)
+            + cell(FOOTER_OUTER_COL_TWIPS, "right", slc_cell_content, top_border=True)
+        )
 
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        '<w:p><w:pPr>'
-        '<w:pStyle w:val="Footer"/>'
-        '<w:pBdr><w:top w:val="single" w:sz="24" w:space="1" w:color="1A99A0"/></w:pBdr>'
-        '<w:tabs><w:tab w:val="center" w:pos="' + str(FOOTER_CENTER_TAB_TWIPS) + '"/>'
-        '<w:tab w:val="right" w:pos="' + str(FOOTER_RIGHT_TAB_TWIPS) + '"/></w:tabs>'
-        '</w:pPr>' + body + '</w:p></w:ftr>'
+        '<w:tbl>'
+        '<w:tblPr>'
+        '<w:tblW w:w="' + str(FOOTER_CONTENT_WIDTH_TWIPS) + '" w:type="dxa"/>'
+        '<w:tblLayout w:type="fixed"/>'
+        '<w:tblBorders>'
+        '<w:top w:val="none" w:sz="0" w:space="0"/>'
+        '<w:left w:val="none" w:sz="0" w:space="0"/>'
+        '<w:bottom w:val="none" w:sz="0" w:space="0"/>'
+        '<w:right w:val="none" w:sz="0" w:space="0"/>'
+        '<w:insideH w:val="none" w:sz="0" w:space="0"/>'
+        '<w:insideV w:val="none" w:sz="0" w:space="0"/>'
+        '</w:tblBorders>'
+        '</w:tblPr>'
+        '<w:tblGrid>'
+        '<w:gridCol w:w="' + str(FOOTER_OUTER_COL_TWIPS) + '"/>'
+        '<w:gridCol w:w="' + str(FOOTER_CENTER_COL_TWIPS) + '"/>'
+        '<w:gridCol w:w="' + str(FOOTER_OUTER_COL_TWIPS) + '"/>'
+        '</w:tblGrid>'
+        '<w:tr>' + cells + '</w:tr>'
+        '</w:tbl>'
+        '<w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr></w:p>'
+        '</w:ftr>'
     )
+
 
 def inject_footer_into_sectPr(sPr, footer_even_rid, footer_odd_rid):
     for fr in sPr.findall(wt("footerReference")):
