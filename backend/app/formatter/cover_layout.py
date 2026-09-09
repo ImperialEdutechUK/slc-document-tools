@@ -13,7 +13,10 @@ rounding can never expose a white strip at a page edge.
 
 from __future__ import annotations
 
+import io
 import xml.etree.ElementTree as ET
+
+from PIL import Image
 
 V_NS = "urn:schemas-microsoft-com:vml"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -41,6 +44,94 @@ _REFERENCE_TEXTBOX = {
 # 1 pt on every side is enough to hide renderer rounding without visibly
 # cropping the artwork. Word clips the excess at the page boundary.
 BACKGROUND_BLEED_PT = 1.0
+
+
+# Brand teal used for the cover's bottom text band (matches the footer rule
+# color and the table-cell border color used elsewhere in the formatter).
+BRAND_TEAL_RGB = (0x1A, 0x99, 0xA0)
+
+# How far a pixel's color may drift from BRAND_TEAL_RGB (Euclidean distance
+# in RGB space) and still count as "the teal band", including its
+# semi-transparent gradient edge over the photo. Calibrated against real
+# cover photos: solid teal fill sits around distance ~24, the gradient edge
+# around ~40; ordinary photo content (skin tones, suits, walls) measures
+# well above 100.
+_TEAL_MATCH_TOLERANCE = 55
+
+# Minimum number of consecutive non-teal rows (scanning upward from the
+# bottom of the image) required to conclude the teal band has ended, so a
+# single noisy/JPEG-artifact row can't cut the detected band short.
+_BAND_BOUNDARY_CONFIRM_ROWS = 4
+
+
+def detect_teal_band_top_fraction(image_bytes: bytes) -> float | None:
+    """Return how far down a cover photo its solid teal band begins.
+
+    Cover photos carry their brand-teal caption band baked directly into
+    the image, and different photos position that band at different
+    heights. A text box positioned from a single fixed reference coordinate
+    (calibrated against one specific photo) can therefore land above the
+    band — overlapping the photograph — on any other photo whose band sits
+    lower.
+
+    This scans a vertical strip near the horizontal center of the image,
+    from the bottom upward, looking for where the pixel color stops being
+    within BRAND_TEAL_RGB's tolerance. That boundary, expressed as a
+    fraction of the image's total height (0 = top, 1 = bottom), is where
+    the solid band reliably begins. Returns None if no such band can be
+    confidently detected (e.g. a photo with no teal band at all), so the
+    caller can fall back to a fixed default rather than mis-position text
+    against a boundary that doesn't really exist.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            width, height = img.size
+            if width < 2 or height < 2:
+                return None
+
+            left = int(width * 0.3)
+            right = max(left + 1, int(width * 0.7))
+            strip = img.crop((left, 0, right, height))
+            pixels = strip.load()
+            strip_width = right - left
+
+            def row_is_teal(y: int) -> bool:
+                total = 0
+                r_sum = g_sum = b_sum = 0
+                for x in range(strip_width):
+                    r, g, b = pixels[x, y]
+                    r_sum += r
+                    g_sum += g
+                    b_sum += b
+                    total += 1
+                r_avg = r_sum / total
+                g_avg = g_sum / total
+                b_avg = b_sum / total
+                distance = (
+                    (r_avg - BRAND_TEAL_RGB[0]) ** 2
+                    + (g_avg - BRAND_TEAL_RGB[1]) ** 2
+                    + (b_avg - BRAND_TEAL_RGB[2]) ** 2
+                ) ** 0.5
+                return distance <= _TEAL_MATCH_TOLERANCE
+
+            if not row_is_teal(height - 1):
+                return None
+
+            non_teal_run = 0
+            boundary_y = 0
+            for y in range(height - 1, -1, -1):
+                if row_is_teal(y):
+                    non_teal_run = 0
+                    boundary_y = y
+                else:
+                    non_teal_run += 1
+                    if non_teal_run >= _BAND_BOUNDARY_CONFIRM_ROWS:
+                        break
+
+            return boundary_y / height
+    except Exception:
+        return None
 
 
 def vqn(tag: str) -> str:
@@ -93,14 +184,54 @@ def _to_emu(points: float) -> str:
     return str(int(round(points * EMU_PER_POINT)))
 
 
-def _scaled_textbox(page_width_pt: float, page_height_pt: float) -> dict[str, float]:
+_BAND_TOP_PADDING_PT = 10.0
+_BAND_BOTTOM_MARGIN_PT = 18.0
+_MIN_TEXTBOX_HEIGHT_PT = 90.0
+
+
+def _scaled_textbox(
+    page_width_pt: float,
+    page_height_pt: float,
+    band_top_fraction: float | None = None,
+) -> dict[str, float]:
     scale_x = page_width_pt / REFERENCE_PAGE_WIDTH_PT
     scale_y = page_height_pt / REFERENCE_PAGE_HEIGHT_PT
+
+    left = _REFERENCE_TEXTBOX["left"] * scale_x
+    width = _REFERENCE_TEXTBOX["width"] * scale_x
+    default_top = _REFERENCE_TEXTBOX["top"] * scale_y
+    default_height = _REFERENCE_TEXTBOX["height"] * scale_y
+
+    if band_top_fraction is None:
+        return {
+            "left": left,
+            "top": default_top,
+            "width": width,
+            "height": default_height,
+        }
+
+    top = (band_top_fraction * page_height_pt) + _BAND_TOP_PADDING_PT
+    available_height = page_height_pt - top - _BAND_BOTTOM_MARGIN_PT
+
+    if available_height < _MIN_TEXTBOX_HEIGHT_PT:
+        # The detected band is too close to the bottom of the page to fit a
+        # readable text box below it — this reads as an unreliable
+        # detection (e.g. a very thin accent stripe rather than the real
+        # caption band), so fall back to the fixed reference position
+        # rather than cramming text into a sliver of space.
+        return {
+            "left": left,
+            "top": default_top,
+            "width": width,
+            "height": default_height,
+        }
+
+    height = min(default_height, available_height)
     return {
-        "left": _REFERENCE_TEXTBOX["left"] * scale_x,
-        "top": _REFERENCE_TEXTBOX["top"] * scale_y,
-        "width": _REFERENCE_TEXTBOX["width"] * scale_x,
-        "height": _REFERENCE_TEXTBOX["height"] * scale_y,
+        "left": left,
+        "top": top,
+        "width": width,
+        "height": height,
     }
 
 
@@ -218,10 +349,18 @@ def position_cover_textboxes(
     cover_element: ET.Element,
     page_width_pt: float = REFERENCE_PAGE_WIDTH_PT,
     page_height_pt: float = REFERENCE_PAGE_HEIGHT_PT,
+    band_top_fraction: float | None = None,
 ) -> int:
-    """Position modern and legacy cover text boxes against the actual page."""
+    """Position modern and legacy cover text boxes against the actual page.
 
-    box = _scaled_textbox(page_width_pt, page_height_pt)
+    When ``band_top_fraction`` is given (see
+    ``detect_teal_band_top_fraction``), the box is anchored just below that
+    detected boundary instead of the fixed reference position, so the text
+    lands inside this specific photo's teal band rather than a position
+    calibrated against a different photo.
+    """
+
+    box = _scaled_textbox(page_width_pt, page_height_pt, band_top_fraction)
     changed = 0
 
     # Modern DrawingML representation used by current Word versions.

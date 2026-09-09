@@ -265,11 +265,142 @@ def make_page_break_paragraph() -> ET.Element:
     return paragraph
 
 
-def make_toc_elements() -> list[ET.Element]:
+def collect_toc_entries_and_bookmark_headings(
+    body: ET.Element,
+    *,
+    start_page: int = 1,
+) -> list[tuple[str, int, str, int]]:
+    """Walk the finalized body, bookmark every Heading 1-3 paragraph, and
+    return the data needed to build real TOC entries: one
+    ``(bookmark_name, level, text, page_number)`` tuple per heading, in
+    document order.
+
+    Must run after ``force_headings_to_new_pages`` (and after
+    ``promote_manual_numbered_headings``), since it reads each heading's
+    already-decided ``pageBreakBefore`` state directly rather than
+    re-deriving it: a heading that carries the flag starts a new numbered
+    page; a heading without it (either the very first heading, or one
+    immediately following another heading with nothing between them, see
+    ``_headings_immediately_following_another_heading``) shares the
+    previous heading's page.
+
+    The resulting page numbers are a best-effort approximation, not a true
+    layout calculation: a heading's own section may run across more than
+    one physical page if it holds a lot of body text, and this model has
+    no way to know that without actually laying out the document. Word
+    will silently correct these the moment the file is opened there
+    (``updateFields`` is set), so this only matters for viewers that never
+    evaluate the field — but it means the numbers can drift low for very
+    long sections.
+    """
+    parent_map = {
+        child: parent
+        for parent in body.iter()
+        for child in list(parent)
+    }
+
+    entries: list[tuple[str, int, str, int]] = []
+    current_page = start_page
+    bookmark_id = 1000
+
+    for paragraph in body.iter(wt("p")):
+        style = _paragraph_style(paragraph)
+        if not _is_heading_style(style):
+            continue
+
+        ancestor = parent_map.get(paragraph)
+        inside_text_box = False
+        while ancestor is not None and ancestor is not body:
+            if ancestor.tag == wt("txbxContent"):
+                inside_text_box = True
+                break
+            ancestor = parent_map.get(ancestor)
+        if inside_text_box:
+            continue
+
+        text = _paragraph_text(paragraph)
+        if not text:
+            continue
+
+        p_pr = paragraph.find(wt("pPr"))
+        if entries:
+            has_page_break = (
+                p_pr is not None and p_pr.find(wt("pageBreakBefore")) is not None
+            )
+            if has_page_break:
+                current_page += 1
+
+        level = {"Heading1": 1, "Heading2": 2, "Heading3": 3}.get(style, 1)
+        bookmark_id += 1
+        bookmark_name = f"_Toc{bookmark_id:08d}"
+
+        bookmark_start = ET.Element(wt("bookmarkStart"))
+        bookmark_start.set(wt("id"), str(bookmark_id))
+        bookmark_start.set(wt("name"), bookmark_name)
+        # w:pPr, if present, must stay the first child of w:p per the OOXML
+        # schema — insert the bookmark right after it rather than at index 0.
+        insert_at = 1 if p_pr is not None else 0
+        paragraph.insert(insert_at, bookmark_start)
+
+        bookmark_end = ET.Element(wt("bookmarkEnd"))
+        bookmark_end.set(wt("id"), str(bookmark_id))
+        paragraph.append(bookmark_end)
+
+        entries.append((bookmark_name, level, text, current_page))
+
+    return entries
+
+
+def _make_toc_entry_paragraph(
+    bookmark_name: str, level: int, text: str, page_number: int
+) -> ET.Element:
+    paragraph = ET.Element(wt("p"))
+    p_pr = ET.SubElement(paragraph, wt("pPr"))
+    ET.SubElement(p_pr, wt("pStyle")).set(wt("val"), f"TOC{level}")
+
+    tabs = ET.SubElement(p_pr, wt("tabs"))
+    tab = ET.SubElement(tabs, wt("tab"))
+    tab.set(wt("val"), "right")
+    tab.set(wt("leader"), "dot")
+    tab.set(wt("pos"), "9026")
+
+    hyperlink = ET.SubElement(paragraph, wt("hyperlink"))
+    hyperlink.set(wt("anchor"), bookmark_name)
+    hyperlink.set(wt("history"), "1")
+
+    text_run = ET.SubElement(hyperlink, wt("r"))
+    text_rpr = ET.SubElement(text_run, wt("rPr"))
+    ET.SubElement(text_rpr, wt("rStyle")).set(wt("val"), "Hyperlink")
+    text_elem = ET.SubElement(text_run, wt("t"))
+    text_elem.text = text
+
+    tab_run = ET.SubElement(paragraph, wt("r"))
+    ET.SubElement(tab_run, wt("tab"))
+
+    page_run = ET.SubElement(paragraph, wt("r"))
+    page_elem = ET.SubElement(page_run, wt("t"))
+    page_elem.text = str(page_number)
+
+    return paragraph
+
+
+def make_toc_elements(
+    entries: list[tuple[str, int, str, int]] | None = None,
+) -> list[ET.Element]:
     """Create an automatic Word TOC followed by a page break.
 
-    Word updates the field when the document opens because the package's
-    settings are also marked with ``updateFields`` by the formatter.
+    Word recalculates the field when the document opens because the
+    package's settings are also marked with ``updateFields`` by the
+    formatter, so the TOC is always correct in Word regardless of what is
+    written here.
+
+    When ``entries`` is provided (see
+    ``collect_toc_entries_and_bookmark_headings``), the field's cached
+    result is pre-filled with real, hyperlinked, page-numbered entries
+    instead of a placeholder message, so the TOC already looks correct in
+    viewers that don't evaluate Word fields (PDF export, LibreOffice,
+    etc). It remains a genuine, live TOC field either way — Word can still
+    refresh it manually (F9) if the document is edited further.
     """
     heading = ET.Element(wt("p"))
     heading_pr = ET.SubElement(heading, wt("pPr"))
@@ -294,15 +425,29 @@ def make_toc_elements() -> list[ET.Element]:
     separator = ET.SubElement(separator_run, wt("fldChar"))
     separator.set(wt("fldCharType"), "separate")
 
-    placeholder_run = ET.SubElement(field_paragraph, wt("r"))
-    placeholder_text = ET.SubElement(placeholder_run, wt("t"))
-    placeholder_text.text = (
-        "The table of contents will update automatically when opened in "
-        "Microsoft Word."
-    )
+    elements = [heading, field_paragraph]
 
-    end_run = ET.SubElement(field_paragraph, wt("r"))
-    end = ET.SubElement(end_run, wt("fldChar"))
-    end.set(wt("fldCharType"), "end")
+    if entries:
+        for bookmark_name, level, text, page_number in entries:
+            elements.append(
+                _make_toc_entry_paragraph(bookmark_name, level, text, page_number)
+            )
+        end_paragraph = ET.Element(wt("p"))
+        end_run = ET.SubElement(end_paragraph, wt("r"))
+        end = ET.SubElement(end_run, wt("fldChar"))
+        end.set(wt("fldCharType"), "end")
+        elements.append(end_paragraph)
+    else:
+        placeholder_run = ET.SubElement(field_paragraph, wt("r"))
+        placeholder_text = ET.SubElement(placeholder_run, wt("t"))
+        placeholder_text.text = (
+            "The table of contents will update automatically when opened in "
+            "Microsoft Word."
+        )
 
-    return [heading, field_paragraph, make_page_break_paragraph()]
+        end_run = ET.SubElement(field_paragraph, wt("r"))
+        end = ET.SubElement(end_run, wt("fldChar"))
+        end.set(wt("fldCharType"), "end")
+
+    elements.append(make_page_break_paragraph())
+    return elements
