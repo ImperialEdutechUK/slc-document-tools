@@ -22,9 +22,18 @@ from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
 from .formatter.engine import process
 from .formatter.pdf_editing import PdfEditingError, get_pdf_page_count, remove_pdf_pages
-from .formatter.simple_editing import SimpleEditingError, apply_simple_edits, get_editable_paragraphs
+from .formatter.simple_editing import (
+    SimpleEditingError,
+    apply_simple_edits,
+    edit_footer,
+    get_editable_paragraphs,
+    get_footer_settings,
+    regenerate_toc,
+    replace_paragraph_text,
+)
 from .models import Job
-from .schemas import JobResponse, SimpleEditRequest
+from .schemas import FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest
+from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, storage
@@ -32,9 +41,9 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.09.09-v6-simple-format-editor"
+BUILD_VERSION = "2026.09.11-v7-expanded-document-editor"
 
-app = FastAPI(title=APP_NAME, version="0.4.0")
+app = FastAPI(title=APP_NAME, version="0.5.0")
 
 origins = [
     item.strip()
@@ -417,6 +426,210 @@ def simple_edit_formatted_job(
     except Exception as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=500, detail="Simple document editing failed.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/footer-settings")
+def footer_settings(job_id: str, db: Session = Depends(get_db)) -> dict:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Footer editing is available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        settings = get_footer_settings(source_payload)
+        return {"job_id": source_job.id, **settings}
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/edit-text", response_model=JobResponse)
+def edit_paragraph_text(
+    job_id: str,
+    request: TextEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Text editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "text_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = replace_paragraph_text(
+            source_payload, request.paragraph_index, request.text
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["text_edit"] = {
+            "paragraph_index": request.paragraph_index,
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except (StorageError, SimpleEditingError) as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Text editing failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/edit-footer", response_model=JobResponse)
+def edit_document_footer(
+    job_id: str,
+    request: FooterEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Footer editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "footer_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed_parts = edit_footer(
+            source_payload,
+            course_text=request.course_text,
+            copyright_text=request.copyright_text,
+            page_label=request.page_label,
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["footer_edit"] = {
+            "footer_parts_changed": changed_parts,
+            "source_job_id": source_job.id,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except (StorageError, SimpleEditingError) as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Footer editing failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/update-toc", response_model=JobResponse)
+def update_document_toc(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="TOC updates are available for DOCX files only.")
+
+    edit_job = _new_job(db, "toc_update", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, entries = regenerate_toc(source_payload)
+
+        field_refresh = {
+            "exact_layout_refresh": False,
+            "indexes_updated": 0,
+            "fields_refreshed": False,
+        }
+        field_refresh_warning = None
+        try:
+            edited_payload, field_refresh = update_docx_fields(edited_payload)
+        except LibreOfficeFieldError as exc:
+            # The cached TOC has already been rebuilt above. Keep that valid
+            # document as a fallback and report that exact layout/page-number
+            # recalculation was unavailable on this server.
+            field_refresh_warning = str(exc)
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["toc_update"] = {
+            "entries": entries,
+            "source_job_id": source_job.id,
+            **field_refresh,
+        }
+        if field_refresh_warning:
+            details["toc_update"]["warning"] = field_refresh_warning
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except (StorageError, SimpleEditingError) as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Table of Contents update failed.") from exc
 
 
 @app.post(f"{API_PREFIX}/jobs/{{job_id}}/convert-to-pdf", response_model=JobResponse)

@@ -24,3 +24,14 @@ class JobResponse(BaseModel):
 class SimpleEditRequest(BaseModel):
     paragraph_indices: list[int] = Field(default_factory=list)
     action: str
+
+
+class TextEditRequest(BaseModel):
+    paragraph_index: int
+    text: str
+
+
+class FooterEditRequest(BaseModel):
+    course_text: str = ""
+    copyright_text: str = "© South London College Ltd"
+    page_label: str = " | Page"

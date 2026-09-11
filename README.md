@@ -53,9 +53,14 @@ New linked-image automation is included:
 After formatting a single DOCX, the user can stay in the formatter screen to:
 
 - Preview the formatted document.
-- Open a lightweight formatting editor.
+- Open a lightweight document editor without leaving the formatter workflow.
+- Edit paragraph wording directly; pressing Enter in the text editor creates a manual next line in the DOCX.
 - Select paragraphs and switch between bullets, numbering and normal text.
+- Add blank lines above/below selected paragraphs.
 - Force selected paragraphs to the next page or return them to normal page flow.
+- Keep selected paragraphs together on one page where possible, or allow normal page splitting.
+- Edit the generated footer course text, copyright text and page label.
+- Refresh/rebuild the generated Table of Contents after heading or layout edits; LibreOffice UNO recalculates the live TOC page numbers before the refreshed preview.
 - Convert the current edited DOCX directly to PDF.
 - Automatically remove an unwanted blank second PDF page when detected.
 
@@ -122,7 +127,7 @@ Create a Railway project containing:
 2. A **bucket/object-storage** service if persistent document output is required.
 3. A backend service whose root directory is `backend/` and which builds from `backend/Dockerfile`.
 
-The Docker image installs LibreOffice Writer plus the open-source font packages used for stable Office-font substitution. No proprietary Microsoft font files are bundled in the repository.
+The Docker image installs LibreOffice Writer, the Python UNO bridge used for exact TOC field/page-number refresh, plus the open-source font packages used for stable Office-font substitution. No proprietary Microsoft font files are bundled in the repository.
 
 Set backend variables using `backend/.env.example` as the guide. In particular:
 
@@ -137,7 +142,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.09.09-v6-simple-format-editor`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.09.11-v7-expanded-document-editor`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -174,6 +179,10 @@ POST /api/v1/word-to-pdf
 GET  /api/v1/jobs/{job_id}/preview
 GET  /api/v1/jobs/{job_id}/editable-paragraphs
 POST /api/v1/jobs/{job_id}/simple-edit
+POST /api/v1/jobs/{job_id}/edit-text
+GET  /api/v1/jobs/{job_id}/footer-settings
+POST /api/v1/jobs/{job_id}/edit-footer
+POST /api/v1/jobs/{job_id}/update-toc
 POST /api/v1/jobs/{job_id}/convert-to-pdf
 POST /api/v1/pdf/page-count
 POST /api/v1/pdf/remove-pages
@@ -189,7 +198,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **54 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
+The backend currently has **58 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
 
 ## Next implementation step
 

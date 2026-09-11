@@ -33,6 +33,13 @@ type EditableParagraph = {
   keep_together: boolean;
 };
 
+type FooterSettings = {
+  course_text: string;
+  copyright_text: string;
+  page_label: string;
+  footer_parts: number;
+};
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
 ).replace(/\/$/, "");
@@ -302,6 +309,16 @@ function FormatterPanel() {
   const [selectedParagraphs, setSelectedParagraphs] = useState<number[]>([]);
   const [editorSearch, setEditorSearch] = useState("");
   const [editMessage, setEditMessage] = useState("");
+  const [textEditorOpen, setTextEditorOpen] = useState(false);
+  const [textDraft, setTextDraft] = useState("");
+  const [footerEditorOpen, setFooterEditorOpen] = useState(false);
+  const [footerBusy, setFooterBusy] = useState(false);
+  const [footerSettings, setFooterSettings] = useState<FooterSettings>({
+    course_text: "",
+    copyright_text: "© South London College Ltd",
+    page_label: " | Page",
+    footer_parts: 0,
+  });
 
   const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
 
@@ -321,6 +338,15 @@ function FormatterPanel() {
     setSelectedParagraphs([]);
     setEditorSearch("");
     setEditMessage("");
+    setTextEditorOpen(false);
+    setTextDraft("");
+    setFooterEditorOpen(false);
+    setFooterSettings({
+      course_text: "",
+      copyright_text: "© South London College Ltd",
+      page_label: " | Page",
+      footer_parts: 0,
+    });
     setPreviewUrl((current) => {
       if (current) {
         URL.revokeObjectURL(current);
@@ -472,6 +498,10 @@ function FormatterPanel() {
       | "normal"
       | "page_break_before"
       | "remove_page_break_before"
+      | "keep_together"
+      | "allow_split"
+      | "blank_line_before"
+      | "blank_line_after"
   ) {
     if (!job || selectedParagraphs.length === 0) {
       setError("Select at least one paragraph to edit.");
@@ -505,6 +535,167 @@ function FormatterPanel() {
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "The formatting edit failed."
+      );
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  function openTextEditor() {
+    if (selectedParagraphs.length !== 1) {
+      setError("Select exactly one paragraph to edit its text.");
+      return;
+    }
+
+    const paragraph = editableParagraphs.find(
+      (item) => item.index === selectedParagraphs[0]
+    );
+    if (!paragraph) {
+      setError("The selected paragraph could not be found.");
+      return;
+    }
+
+    setError("");
+    setFooterEditorOpen(false);
+    setTextDraft(paragraph.text);
+    setTextEditorOpen(true);
+  }
+
+  async function saveTextEdit() {
+    if (!job || selectedParagraphs.length !== 1) {
+      setError("Select exactly one paragraph to edit its text.");
+      return;
+    }
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/edit-text`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paragraph_index: selectedParagraphs[0],
+            text: textDraft,
+          }),
+        }
+      );
+
+      setJob(result);
+      setTextEditorOpen(false);
+      setEditMessage(
+        "Text updated. Pressing Enter in the text box creates a new line in the document."
+      );
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The text edit failed.");
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  async function toggleFooterEditor() {
+    if (!job) return;
+
+    if (footerEditorOpen) {
+      setFooterEditorOpen(false);
+      return;
+    }
+
+    setFooterBusy(true);
+    setError("");
+    setTextEditorOpen(false);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/footer-settings`,
+        { method: "GET" }
+      );
+      setFooterSettings({
+        course_text: result.course_text ?? "",
+        copyright_text:
+          result.copyright_text ?? "© South London College Ltd",
+        page_label: result.page_label ?? " | Page",
+        footer_parts: result.footer_parts ?? 0,
+      });
+      setFooterEditorOpen(true);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "The footer could not be loaded."
+      );
+    } finally {
+      setFooterBusy(false);
+    }
+  }
+
+  async function saveFooterEdit() {
+    if (!job) return;
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/edit-footer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            course_text: footerSettings.course_text,
+            copyright_text: footerSettings.copyright_text,
+            page_label: footerSettings.page_label,
+          }),
+        }
+      );
+
+      setJob(result);
+      setFooterEditorOpen(false);
+      setEditMessage("Footer updated on the document pages.");
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The footer edit failed.");
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  async function updateTableOfContents() {
+    if (!job) return;
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/update-toc`,
+        { method: "POST" }
+      );
+      setJob(result);
+      setTextEditorOpen(false);
+      setFooterEditorOpen(false);
+      const tocDetails = result.details?.toc_update;
+      setEditMessage(
+        tocDetails?.exact_layout_refresh
+          ? `Table of Contents updated with ${tocDetails?.entries ?? 0} heading(s), including refreshed page numbers.`
+          : `Table of Contents rebuilt with ${tocDetails?.entries ?? 0} heading(s). Exact page numbers will refresh when opened in Word.`
+      );
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The Table of Contents could not be updated."
       );
     } finally {
       setEditApplyBusy(false);
@@ -850,11 +1041,11 @@ function FormatterPanel() {
                   <section className="simple-editor">
                     <div className="simple-editor-heading">
                       <div>
-                        <h4>Simple formatting editor</h4>
+                        <h4>Document editor</h4>
                         <p>
-                          Select one or more paragraphs, then apply a simple
-                          formatting change. The preview refreshes automatically
-                          after each edit.
+                          Edit paragraph text, add new lines, change lists and
+                          page flow, update the footer, or refresh the Table of
+                          Contents. The preview refreshes after each saved edit.
                         </p>
                       </div>
 
@@ -863,52 +1054,250 @@ function FormatterPanel() {
                       </span>
                     </div>
 
-                    <div className="editor-toolbar">
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={editApplyBusy || selectedParagraphs.length === 0}
-                        onClick={() => applySimpleEdit("bullets")}
-                      >
-                        • Bullets
-                      </button>
+                    <div className="editor-tool-section">
+                      <span className="editor-tool-label">Paragraph tools</span>
 
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={editApplyBusy || selectedParagraphs.length === 0}
-                        onClick={() => applySimpleEdit("numbering")}
-                      >
-                        1. Numbering
-                      </button>
+                      <div className="editor-toolbar">
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length !== 1}
+                          onClick={openTextEditor}
+                        >
+                          Edit text / next line
+                        </button>
 
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={editApplyBusy || selectedParagraphs.length === 0}
-                        onClick={() => applySimpleEdit("normal")}
-                      >
-                        Normal text
-                      </button>
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("bullets")}
+                        >
+                          • Bullets
+                        </button>
 
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={editApplyBusy || selectedParagraphs.length === 0}
-                        onClick={() => applySimpleEdit("page_break_before")}
-                      >
-                        Move to next page
-                      </button>
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("numbering")}
+                        >
+                          1. Numbering
+                        </button>
 
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={editApplyBusy || selectedParagraphs.length === 0}
-                        onClick={() => applySimpleEdit("remove_page_break_before")}
-                      >
-                        Normal page flow
-                      </button>
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("normal")}
+                        >
+                          Normal text
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("blank_line_before")}
+                        >
+                          Add line above
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("blank_line_after")}
+                        >
+                          Add line below
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("page_break_before")}
+                        >
+                          Move to next page
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("remove_page_break_before")}
+                        >
+                          Normal page flow
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("keep_together")}
+                        >
+                          Keep paragraph together
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("allow_split")}
+                        >
+                          Allow page split
+                        </button>
+                      </div>
                     </div>
+
+                    <div className="editor-tool-section">
+                      <span className="editor-tool-label">Document tools</span>
+
+                      <div className="editor-toolbar">
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || footerBusy}
+                          onClick={toggleFooterEditor}
+                        >
+                          {footerBusy
+                            ? "Loading footer…"
+                            : footerEditorOpen
+                            ? "Close footer editor"
+                            : "Edit footer"}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy}
+                          onClick={updateTableOfContents}
+                        >
+                          Update TOC
+                        </button>
+                      </div>
+                    </div>
+
+                    {textEditorOpen && (
+                      <div className="editor-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Edit paragraph text</h5>
+                            <p>
+                              Change the wording directly. Press Enter anywhere
+                              in the box to place text on the next line in Word.
+                            </p>
+                          </div>
+                        </div>
+
+                        <textarea
+                          className="editor-textarea"
+                          value={textDraft}
+                          onChange={(event) => setTextDraft(event.target.value)}
+                          rows={7}
+                          autoFocus
+                        />
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={editApplyBusy}
+                            onClick={saveTextEdit}
+                          >
+                            {editApplyBusy ? "Saving…" : "Save text"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={editApplyBusy}
+                            onClick={() => setTextEditorOpen(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {footerEditorOpen && (
+                      <div className="editor-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Edit footer</h5>
+                            <p>
+                              Update the course text, copyright text and page
+                              label used in the generated footer.
+                            </p>
+                          </div>
+
+                          <span className="selection-count">
+                            {footerSettings.footer_parts} footer part(s)
+                          </span>
+                        </div>
+
+                        <div className="footer-editor-grid">
+                          <label className="input-label">
+                            Course / centre footer text
+                            <input
+                              value={footerSettings.course_text}
+                              onChange={(event) =>
+                                setFooterSettings((current) => ({
+                                  ...current,
+                                  course_text: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+
+                          <label className="input-label">
+                            Copyright text
+                            <input
+                              value={footerSettings.copyright_text}
+                              onChange={(event) =>
+                                setFooterSettings((current) => ({
+                                  ...current,
+                                  copyright_text: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+
+                          <label className="input-label">
+                            Page label
+                            <input
+                              value={footerSettings.page_label}
+                              onChange={(event) =>
+                                setFooterSettings((current) => ({
+                                  ...current,
+                                  page_label: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                        </div>
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={editApplyBusy}
+                            onClick={saveFooterEdit}
+                          >
+                            {editApplyBusy ? "Saving…" : "Save footer"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={editApplyBusy}
+                            onClick={() => setFooterEditorOpen(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     <div className="editor-filter-row">
                       <input
@@ -972,6 +1361,9 @@ function FormatterPanel() {
                                   )}
                                   {paragraph.page_break_before && (
                                     <span>Starts new page</span>
+                                  )}
+                                  {paragraph.keep_together && (
+                                    <span>Keeps together</span>
                                   )}
                                 </span>
 

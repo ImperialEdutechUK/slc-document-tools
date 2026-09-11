@@ -1,0 +1,2 @@
+This code package intentionally does not contain font binary files.
+Before deploying to Railway, keep/copy the same properly licensed Garamond font files from your existing private project into this backend/fonts/ folder.

@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libreoffice-writer \
+       python3-uno \
        fontconfig \
        fonts-liberation \
        fonts-dejavu-core \
