@@ -10,6 +10,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from .document_structure import collect_toc_entries_and_bookmark_headings, make_toc_elements
+from .heading_styles import apply_heading_style
 
 WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 ORNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -98,6 +99,15 @@ def _set_on_off(p_pr: ET.Element, tag: str, enabled: bool) -> None:
         if child.tag in allowed_before:
             insert_at = index + 1
     p_pr.insert(insert_at, element)
+
+
+def _set_paragraph_style(paragraph: ET.Element, style_name: str) -> None:
+    p_pr = _ensure_p_pr(paragraph)
+    p_style = p_pr.find(wt("pStyle"))
+    if p_style is None:
+        p_style = ET.Element(wt("pStyle"))
+        p_pr.insert(0, p_style)
+    p_style.set(wt("val"), style_name)
 
 
 def _set_list_numbering(paragraph: ET.Element, num_id: str) -> None:
@@ -309,6 +319,7 @@ def apply_simple_edits(
     docx_bytes: bytes, paragraph_indices: list[int], action: str
 ) -> tuple[bytes, int]:
     allowed_actions = {
+        "heading1",
         "bullets",
         "numbering",
         "normal",
@@ -359,10 +370,13 @@ def apply_simple_edits(
             if paragraph_index not in requested or not _is_user_editable(child):
                 continue
 
-            if action in {"bullets", "numbering"}:
+            if action == "heading1":
+                apply_heading_style(child, "Heading1")
+            elif action in {"bullets", "numbering"}:
                 _set_list_numbering(child, num_id)
             elif action == "normal":
                 _clear_list_numbering(child)
+                _set_paragraph_style(child, "Normal")
             elif action == "page_break_before":
                 _set_on_off(_ensure_p_pr(child), "pageBreakBefore", True)
             elif action == "remove_page_break_before":
@@ -503,6 +517,242 @@ def _classify_footer_cell(cell: ET.Element) -> str:
     return "empty"
 
 
+_FOOTER_PAGE_WIDTH_TWIPS = 11906
+_FOOTER_PAGE_MARGIN_TWIPS = 1440
+_FOOTER_CONTENT_WIDTH_TWIPS = _FOOTER_PAGE_WIDTH_TWIPS - (2 * _FOOTER_PAGE_MARGIN_TWIPS)
+# Match the original SLC footer geometry: equal left/right zones around a
+# truly centred course-title zone. Odd/even pages mirror content, not widths.
+_FOOTER_PAGE_COL_TWIPS = _FOOTER_CONTENT_WIDTH_TWIPS * 25 // 100
+_FOOTER_COPYRIGHT_COL_TWIPS = _FOOTER_PAGE_COL_TWIPS
+_FOOTER_CENTER_COL_TWIPS = (
+    _FOOTER_CONTENT_WIDTH_TWIPS - _FOOTER_PAGE_COL_TWIPS - _FOOTER_COPYRIGHT_COL_TWIPS
+)
+
+
+_FOOTER_FULL_TITLE_CHAR_LIMIT = 60
+_FOOTER_PAGE_LABEL = " | Page"
+_FOOTER_LEVEL_RE = re.compile(r"\bLevel\s+(?:\d+(?:\.\d+)?|[IVXLC]+)\b\s*", re.IGNORECASE)
+
+
+def _footer_display_course_name(course_name: str) -> str:
+    title = " ".join(str(course_name or "").split())
+    if len(title) <= _FOOTER_FULL_TITLE_CHAR_LIMIT:
+        return title
+    shortened = _FOOTER_LEVEL_RE.sub("", title, count=1)
+    shortened = " ".join(shortened.split())
+    return shortened or title
+
+
+def _footer_course_font_half_points(course_name: str) -> int:
+    # Preserve the source footer's 8 pt Garamond size whenever possible.
+    # Only reduce it after the optional Level X trim has already been applied.
+    length = len(" ".join(str(course_name or "").split()))
+    if length <= 64:
+        return 16
+    if length <= 76:
+        return 15
+    if length <= 88:
+        return 14
+    if length <= 100:
+        return 13
+    if length <= 116:
+        return 12
+    if length <= 132:
+        return 11
+    return 10
+
+
+def _footer_display_copyright(copyright_text: str) -> str:
+    """Return copyright text that cannot wrap between words.
+
+    Some LibreOffice versions can wrap text inside a Word table cell even
+    when ``w:noWrap`` is present. Non-breaking spaces make the one-line rule
+    deterministic without changing how the footer looks.
+    """
+    text = " ".join(str(copyright_text or "").replace("\u00a0", " " ).split())
+    return text.replace(" ", "\u00a0")
+
+
+def _ensure_xml_child(parent: ET.Element, tag: str, *, first: bool = False) -> ET.Element:
+    child = parent.find(wt(tag))
+    if child is None:
+        child = ET.Element(wt(tag))
+        if first:
+            parent.insert(0, child)
+        else:
+            parent.append(child)
+    return child
+
+
+def _set_footer_cell_layout(cell: ET.Element, width: int, *, fit_text: bool = False) -> None:
+    tc_pr = cell.find(wt("tcPr"))
+    if tc_pr is None:
+        tc_pr = ET.Element(wt("tcPr"))
+        cell.insert(0, tc_pr)
+
+    tc_w = _ensure_xml_child(tc_pr, "tcW", first=True)
+    tc_w.set(wt("w"), str(width))
+    tc_w.set(wt("type"), "dxa")
+    _ensure_xml_child(tc_pr, "noWrap")
+
+    fit = tc_pr.find(wt("tcFitText"))
+    if fit_text:
+        if fit is None:
+            tc_pr.append(ET.Element(wt("tcFitText")))
+    elif fit is not None:
+        tc_pr.remove(fit)
+
+
+def _set_footer_course_font(cell: ET.Element, course_text: str) -> None:
+    size = str(_footer_course_font_half_points(course_text))
+    for run in cell.iter(wt("r")):
+        # Only resize runs carrying visible title text.
+        if not any((node.text or "") for node in run.findall(wt("t"))):
+            continue
+        r_pr = run.find(wt("rPr"))
+        if r_pr is None:
+            r_pr = ET.Element(wt("rPr"))
+            run.insert(0, r_pr)
+        sz = _ensure_xml_child(r_pr, "sz")
+        sz.set(wt("val"), size)
+        sz_cs = _ensure_xml_child(r_pr, "szCs")
+        sz_cs.set(wt("val"), size)
+
+
+
+
+def _set_run_font_size(run: ET.Element, half_points: str) -> None:
+    r_pr = run.find(wt("rPr"))
+    if r_pr is None:
+        r_pr = ET.Element(wt("rPr"))
+        run.insert(0, r_pr)
+    sz = _ensure_xml_child(r_pr, "sz")
+    sz.set(wt("val"), half_points)
+    sz_cs = _ensure_xml_child(r_pr, "szCs")
+    sz_cs.set(wt("val"), half_points)
+
+
+def _normalise_page_number_cell(cell: ET.Element) -> bool:
+    """Force the footer page marker to render exactly as ``1 | Page``.
+
+    The PAGE field stays dynamic, so subsequent pages render as ``2 | Page``,
+    ``3 | Page`` and so on. Rebuilding the paragraph also upgrades older
+    footers where the label appeared before the page number or spacing varied.
+    """
+    before = ET.tostring(cell, encoding="UTF-8")
+    paragraph = cell.find(wt("p"))
+    if paragraph is None:
+        paragraph = ET.SubElement(cell, wt("p"))
+
+    # Preserve paragraph properties such as Footer style and alignment, but
+    # rebuild the visible/field runs in one deterministic order.
+    p_pr = paragraph.find(wt("pPr"))
+    for child in list(paragraph):
+        if child is not p_pr:
+            paragraph.remove(child)
+
+    def add_run(size: str = "18") -> ET.Element:
+        run = ET.SubElement(paragraph, wt("r"))
+        _set_run_font_size(run, size)
+        return run
+
+    begin_run = add_run("18")
+    begin = ET.SubElement(begin_run, wt("fldChar"))
+    begin.set(wt("fldCharType"), "begin")
+
+    instr_run = add_run("18")
+    instr = ET.SubElement(instr_run, wt("instrText"))
+    instr.set("{" + XMLNS + "}space", "preserve")
+    instr.text = r" PAGE \* MERGEFORMAT "
+
+    separate_run = add_run("18")
+    separate = ET.SubElement(separate_run, wt("fldChar"))
+    separate.set(wt("fldCharType"), "separate")
+
+    result_run = add_run("18")
+    result = ET.SubElement(result_run, wt("t"))
+    result.text = "1"
+
+    end_run = add_run("18")
+    end = ET.SubElement(end_run, wt("fldChar"))
+    end.set(wt("fldCharType"), "end")
+
+    label_run = add_run("16")
+    label = ET.SubElement(label_run, wt("t"))
+    label.set("{" + XMLNS + "}space", "preserve")
+    label.text = _FOOTER_PAGE_LABEL
+
+    return before != ET.tostring(cell, encoding="UTF-8")
+
+def _normalise_footer_table_layout(root: ET.Element) -> None:
+    """Keep footer edits on one line without changing the SLC footer style.
+
+    The source design uses equal outer zones with the qualification title
+    centred on the page. We preserve that geometry, the mirrored odd/even
+    placement, the teal rule, and the original font sizing. Only the course
+    title may be shortened (Level X removed) or minimally reduced if needed.
+    """
+    for table in root.iter(wt("tbl")):
+        row = table.find(wt("tr"))
+        if row is None:
+            continue
+        cells = row.findall(wt("tc"))
+        if len(cells) != 3:
+            continue
+
+        kinds = [_classify_footer_cell(cell) for cell in cells]
+        if "course" not in kinds or "page" not in kinds:
+            continue
+
+        widths: list[int] = []
+        for cell, kind in zip(cells, kinds):
+            if kind == "page":
+                width = _FOOTER_PAGE_COL_TWIPS
+                _set_footer_cell_layout(cell, width)
+                _normalise_page_number_cell(cell)
+            elif kind == "copyright":
+                width = _FOOTER_COPYRIGHT_COL_TWIPS
+                _set_footer_cell_layout(cell, width)
+                current_copyright = _footer_cell_text(cell)
+                display_copyright = _footer_display_copyright(current_copyright)
+                if display_copyright != current_copyright:
+                    _replace_visible_text(cell, display_copyright)
+                for run in cell.iter(wt("r")):
+                    if any((node.text or "") for node in run.findall(wt("t"))):
+                        _set_run_font_size(run, "16")
+            else:
+                width = _FOOTER_CENTER_COL_TWIPS
+                _set_footer_cell_layout(cell, width, fit_text=True)
+                current_course_text = _footer_cell_text(cell)
+                display_course_text = _footer_display_course_name(current_course_text)
+                if display_course_text != current_course_text:
+                    _replace_visible_text(cell, display_course_text)
+                _set_footer_course_font(cell, display_course_text)
+            widths.append(width)
+
+        tbl_pr = table.find(wt("tblPr"))
+        if tbl_pr is None:
+            tbl_pr = ET.Element(wt("tblPr"))
+            table.insert(0, tbl_pr)
+        tbl_w = _ensure_xml_child(tbl_pr, "tblW", first=True)
+        tbl_w.set(wt("w"), str(_FOOTER_CONTENT_WIDTH_TWIPS))
+        tbl_w.set(wt("type"), "dxa")
+        layout = _ensure_xml_child(tbl_pr, "tblLayout")
+        layout.set(wt("type"), "fixed")
+
+        grid = table.find(wt("tblGrid"))
+        if grid is None:
+            grid = ET.Element(wt("tblGrid"))
+            # tblGrid belongs after tblPr and before the first row.
+            insert_at = 1 if table.find(wt("tblPr")) is not None else 0
+            table.insert(insert_at, grid)
+        for child in list(grid):
+            grid.remove(child)
+        for width in widths:
+            col = ET.SubElement(grid, wt("gridCol"))
+            col.set(wt("w"), str(width))
+
+
 def _replace_visible_text(container: ET.Element, value: str) -> bool:
     text_nodes = list(container.iter(wt("t")))
     if not text_nodes:
@@ -594,13 +844,13 @@ def get_footer_settings(docx_bytes: bytes) -> dict:
                 return {
                     "course_text": "",
                     "copyright_text": "",
-                    "page_label": " | Page",
+                    "page_label": _FOOTER_PAGE_LABEL,
                     "footer_parts": 0,
                 }
 
             course_text = ""
             copyright_text = ""
-            page_label = " | Page"
+            page_label = _FOOTER_PAGE_LABEL
             for name in footer_names:
                 root = ET.fromstring(archive.read(name))
                 for cell in root.iter(wt("tc")):
@@ -608,11 +858,10 @@ def get_footer_settings(docx_bytes: bytes) -> dict:
                     if kind == "course" and not course_text:
                         course_text = _footer_cell_text(cell)
                     elif kind == "copyright" and not copyright_text:
-                        copyright_text = _footer_cell_text(cell)
+                        copyright_text = _footer_cell_text(cell).replace("\u00a0", " ")
                     elif kind == "page":
-                        text_nodes = list(cell.iter(wt("t")))
-                        if text_nodes:
-                            page_label = text_nodes[-1].text or ""
+                        # Page-number format is fixed to: 1 | Page, 2 | Page, ...
+                        page_label = _FOOTER_PAGE_LABEL
 
             return {
                 "course_text": course_text,
@@ -645,15 +894,25 @@ def edit_footer(
         changed_parts = 0
         for name in footer_names:
             root = ET.fromstring(source.read(name))
+            before_xml = ET.tostring(root, encoding="UTF-8")
             changed = False
             for cell in root.iter(wt("tc")):
                 kind = _classify_footer_cell(cell)
                 if kind == "course":
-                    changed = _replace_visible_text(cell, course_text) or changed
+                    display_course_text = _footer_display_course_name(course_text)
+                    changed = _replace_visible_text(cell, display_course_text) or changed
                 elif kind == "copyright":
                     changed = _replace_visible_text(cell, copyright_text) or changed
                 elif kind == "page":
-                    changed = _replace_page_label(cell, page_label) or changed
+                    # The page marker is a fixed brand format: 1 | Page.
+                    # _normalise_footer_table_layout rebuilds this cell below.
+                    pass
+
+            # Re-apply the branded footer geometry after an edit. This keeps
+            # the original visual style while enforcing the single-line rule.
+            _normalise_footer_table_layout(root)
+            after_xml = ET.tostring(root, encoding="UTF-8")
+            changed = changed or before_xml != after_xml
 
             if changed:
                 changed_parts += 1

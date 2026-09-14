@@ -512,8 +512,64 @@ def add_bullets_to_references(out_body):
 FOOTER_PAGE_WIDTH_TWIPS = 11906
 FOOTER_PAGE_MARGIN_TWIPS = 1440
 FOOTER_CONTENT_WIDTH_TWIPS = FOOTER_PAGE_WIDTH_TWIPS - (2 * FOOTER_PAGE_MARGIN_TWIPS)
-FOOTER_OUTER_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS * 3 // 10
-FOOTER_CENTER_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS - (2 * FOOTER_OUTER_COL_TWIPS)
+
+# Preserve the original SLC footer style from the reference course PDFs:
+# equal outer zones and a centred middle zone. The left/right zones mirror on
+# odd/even pages, while the course title remains geometrically centred on the
+# page. The side widths must therefore stay identical.
+FOOTER_PAGE_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS * 25 // 100
+FOOTER_COPYRIGHT_COL_TWIPS = FOOTER_PAGE_COL_TWIPS
+FOOTER_CENTER_COL_TWIPS = (
+    FOOTER_CONTENT_WIDTH_TWIPS - FOOTER_PAGE_COL_TWIPS - FOOTER_COPYRIGHT_COL_TWIPS
+)
+
+
+_FOOTER_FULL_TITLE_CHAR_LIMIT = 60
+FOOTER_PAGE_LABEL = " | Page"
+_FOOTER_LEVEL_RE = re.compile(r"\bLevel\s+(?:\d+(?:\.\d+)?|[IVXLC]+)\b\s*", re.IGNORECASE)
+
+
+def _footer_display_course_name(course_name):
+    """Return the footer-safe course title.
+
+    The footer must never use a second line. When a course title is longer
+    than the safe one-line budget, remove the first qualification level token
+    (for example ``Level 5``) before applying compact font sizing. This keeps
+    the meaningful qualification title while freeing enough horizontal space.
+    Shorter titles keep their level text unchanged.
+    """
+    title = " ".join(str(course_name or "").split())
+    if len(title) <= _FOOTER_FULL_TITLE_CHAR_LIMIT:
+        return title
+
+    shortened = _FOOTER_LEVEL_RE.sub("", title, count=1)
+    shortened = " ".join(shortened.split())
+    return shortened or title
+
+
+def _footer_course_font_half_points(course_name):
+    """Keep the original 8 pt footer style whenever the title fits.
+
+    Long titles first lose only the leading ``Level X`` token via
+    ``_footer_display_course_name``. Font reduction is a last-resort fallback
+    for unusually long remaining titles so the footer never creates a second
+    line.
+    """
+    length = len(" ".join(str(course_name or "").split()))
+    if length <= 64:
+        return 16  # 8 pt - original SLC footer style
+    if length <= 76:
+        return 15  # 7.5 pt
+    if length <= 88:
+        return 14  # 7 pt
+    if length <= 100:
+        return 13  # 6.5 pt
+    if length <= 116:
+        return 12  # 6 pt
+    if length <= 132:
+        return 11  # 5.5 pt
+    return 10      # 5 pt for unusually long titles
+
 
 def make_footer_xml(course_name, page_on_right):
     page_field = (
@@ -524,41 +580,60 @@ def make_footer_xml(course_name, page_on_right):
         '<w:r><w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>'
     )
 
-    sep = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve"> | Page</w:t></w:r>'
-    cn = course_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    slc = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>© South London College Ltd</w:t></w:r>'
-    crs = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve">' + cn + '</w:t></w:r>'
+    sep = (
+        '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr>'
+        '<w:t xml:space="preserve">' + FOOTER_PAGE_LABEL + '</w:t></w:r>'
+    )
+    display_course_name = _footer_display_course_name(course_name)
+    cn = display_course_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    course_font_size = str(_footer_course_font_half_points(display_course_name))
+    # Non-breaking spaces are intentional: LibreOffice can ignore w:noWrap
+    # in some table-cell layouts, but NBSPs make the copyright text physically
+    # unbreakable while looking identical to normal spaces.
+    # Copyright remains at the original 8 pt Garamond footer size. NBSPs
+    # preserve the exact one-line appearance without changing visible styling.
+    slc = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>©\u00a0South\u00a0London\u00a0College\u00a0Ltd</w:t></w:r>'
+    crs = (
+        '<w:r><w:rPr><w:sz w:val="' + course_font_size + '"/>'
+        '<w:szCs w:val="' + course_font_size + '"/></w:rPr>'
+        '<w:t xml:space="preserve">' + cn + '</w:t></w:r>'
+    )
 
     page_cell_content = page_field + sep
     slc_cell_content = slc
     crs_cell_content = crs
 
-    def cell(width, align, content, top_border=False):
+    def cell(width, align, content, top_border=False, fit_text=False):
         border_xml = (
             '<w:tcBorders><w:top w:val="single" w:sz="24" w:space="0" w:color="1A99A0"/></w:tcBorders>'
             if top_border else ""
         )
+        fit_xml = '<w:tcFitText/>' if fit_text else ''
         return (
             '<w:tc><w:tcPr><w:tcW w:w="' + str(width) + '" w:type="dxa"/>'
             + border_xml +
             '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="0" w:type="dxa"/>'
             '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar>'
-            '<w:vAlign w:val="center"/></w:tcPr>'
+            '<w:noWrap/>' + fit_xml + '<w:vAlign w:val="center"/></w:tcPr>'
             '<w:p><w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="' + align + '"/></w:pPr>'
             + content + '</w:p></w:tc>'
         )
 
     if page_on_right:
+        left_width = FOOTER_COPYRIGHT_COL_TWIPS
+        right_width = FOOTER_PAGE_COL_TWIPS
         cells = (
-            cell(FOOTER_OUTER_COL_TWIPS, "left", slc_cell_content, top_border=True)
-            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True)
-            + cell(FOOTER_OUTER_COL_TWIPS, "right", page_cell_content, top_border=True)
+            cell(left_width, "left", slc_cell_content, top_border=True)
+            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True, fit_text=True)
+            + cell(right_width, "right", page_cell_content, top_border=True)
         )
     else:
+        left_width = FOOTER_PAGE_COL_TWIPS
+        right_width = FOOTER_COPYRIGHT_COL_TWIPS
         cells = (
-            cell(FOOTER_OUTER_COL_TWIPS, "left", page_cell_content, top_border=True)
-            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True)
-            + cell(FOOTER_OUTER_COL_TWIPS, "right", slc_cell_content, top_border=True)
+            cell(left_width, "left", page_cell_content, top_border=True)
+            + cell(FOOTER_CENTER_COL_TWIPS, "center", crs_cell_content, top_border=True, fit_text=True)
+            + cell(right_width, "right", slc_cell_content, top_border=True)
         )
 
     return (
@@ -578,9 +653,9 @@ def make_footer_xml(course_name, page_on_right):
         '</w:tblBorders>'
         '</w:tblPr>'
         '<w:tblGrid>'
-        '<w:gridCol w:w="' + str(FOOTER_OUTER_COL_TWIPS) + '"/>'
+        '<w:gridCol w:w="' + str(left_width) + '"/>'
         '<w:gridCol w:w="' + str(FOOTER_CENTER_COL_TWIPS) + '"/>'
-        '<w:gridCol w:w="' + str(FOOTER_OUTER_COL_TWIPS) + '"/>'
+        '<w:gridCol w:w="' + str(right_width) + '"/>'
         '</w:tblGrid>'
         '<w:tr>' + cells + '</w:tr>'
         '</w:tbl>'
