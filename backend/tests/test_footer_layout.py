@@ -4,6 +4,7 @@ from app.formatter.engine import (
     FOOTER_CENTER_COL_TWIPS,
     FOOTER_COPYRIGHT_COL_TWIPS,
     FOOTER_PAGE_COL_TWIPS,
+    FOOTER_CONTENT_WIDTH_TWIPS,
     make_footer_xml,
 )
 
@@ -43,9 +44,9 @@ def test_long_course_name_footer_stays_single_line_without_changing_brand_geomet
     cells = row.findall(wt("tc"))
     assert len(cells) == 3
 
-    # The original SLC footer is geometrically centred: equal outer zones
-    # around a 50% centre zone. This must not be changed just to make long
-    # text fit.
+    # The SLC footer stays geometrically centred because the outer zones are
+    # equal. The original 25% / 50% / 25% geometry is preserved;
+    # one-line fitting is handled by subtle run-width scaling instead.
     widths = [int(cell.find(wt("tcPr")).find(wt("tcW")).get(wt("w"))) for cell in cells]
     assert widths == [
         FOOTER_PAGE_COL_TWIPS,
@@ -53,6 +54,7 @@ def test_long_course_name_footer_stays_single_line_without_changing_brand_geomet
         FOOTER_COPYRIGHT_COL_TWIPS,
     ]
     assert FOOTER_PAGE_COL_TWIPS == FOOTER_COPYRIGHT_COL_TWIPS
+    assert FOOTER_PAGE_COL_TWIPS == FOOTER_CONTENT_WIDTH_TWIPS * 25 // 100
 
     copyright_cell = cells[2]
     copyright_text = _cell_text(copyright_cell)
@@ -61,9 +63,12 @@ def test_long_course_name_footer_stays_single_line_without_changing_brand_geomet
     copyright_pr = copyright_cell.find(wt("tcPr"))
     assert copyright_pr is not None
     assert copyright_pr.find(wt("noWrap")) is not None
-    # Keep the original visible style: 8 pt copyright, no horizontal squeeze.
+    # Keep the original visible style: 8 pt copyright, with only a 5%
+    # horizontal safeguard so LibreOffice cannot push it to a second line.
     assert _visible_run_sizes(copyright_cell) == ["16"]
     assert copyright_pr.find(wt("tcFitText")) is None
+    copyright_run = next(run for run in copyright_cell.iter(wt("r")) if any((n.text or "") for n in run.findall(wt("t"))))
+    assert copyright_run.find(wt("rPr")).find(wt("w")).get(wt("val")) == "95"
 
     course_cell = cells[1]
     # Long footer titles drop only the qualification level token rather than
@@ -74,8 +79,11 @@ def test_long_course_name_footer_stays_single_line_without_changing_brand_geomet
     assert tc_pr is not None
     assert tc_pr.find(wt("noWrap")) is not None
     assert tc_pr.find(wt("tcFitText")) is not None
-    # This exact title still keeps the original 8 pt footer font after trim.
+    # This exact title still keeps the original 8 pt footer font after trim;
+    # only character width is condensed slightly to keep it on one line.
     assert _visible_run_sizes(course_cell) == ["16"]
+    course_run = next(run for run in course_cell.iter(wt("r")) if any((n.text or "") for n in run.findall(wt("t"))))
+    assert course_run.find(wt("rPr")).find(wt("w")).get(wt("val")) == "90"
 
 
 def test_footer_brand_rule_and_text_sizes_match_reference_style():
@@ -135,6 +143,8 @@ def test_short_course_name_keeps_level_text():
     cells = row.findall(wt("tc"))
     assert _cell_text(cells[1]) == title
     assert _visible_run_sizes(cells[1]) == ["16"]
+    course_run = next(run for run in cells[1].iter(wt("r")) if any((n.text or "") for n in run.findall(wt("t"))))
+    assert course_run.find(wt("rPr")).find(wt("w")).get(wt("val")) == "100"
 
 
 def test_page_number_format_is_number_then_pipe_then_page():

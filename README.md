@@ -55,7 +55,7 @@ After formatting a single DOCX, the user can stay in the formatter screen to:
 - Preview the formatted document.
 - Open a lightweight document editor without leaving the formatter workflow.
 - Edit paragraph wording directly; pressing Enter in the text editor creates a manual next line in the DOCX.
-- Select paragraphs and switch between bullets, numbering and normal text.
+- Select paragraphs and apply Heading 1, bullets, numbering or normal text.
 - Add blank lines above/below selected paragraphs.
 - Force selected paragraphs to the next page or return them to normal page flow.
 - Keep selected paragraphs together on one page where possible, or allow normal page splitting.
@@ -142,7 +142,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.09.11-v7-expanded-document-editor`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.09.14-v9-single-line-footer`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -198,7 +198,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **58 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
+The backend currently has **62 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, and Word-to-PDF conversion.
 
 ## Next implementation step
 

@@ -219,6 +219,20 @@ def _clear_conflicting_formatting(paragraph: ET.Element, ppr: ET.Element) -> Non
         _remove_children_by_local_name(run_properties, _RUN_OVERRIDES)
 
 
+def apply_heading_style(paragraph: ET.Element, style_name: str = "Heading1") -> None:
+    """Apply a template heading style and remove direct formatting that masks it.
+
+    This is used by the lightweight document editor so that choosing Heading 1
+    produces the same visual result as headings created by the main formatter.
+    """
+    if style_name not in {"Heading1", "Heading2", "Heading3"}:
+        raise ValueError(f"Unsupported heading style: {style_name}")
+
+    ppr = _ensure_ppr(paragraph)
+    _set_style(ppr, style_name)
+    _clear_conflicting_formatting(paragraph, ppr)
+
+
 def promote_manual_numbered_headings(out_body: ET.Element) -> int:
     """Apply or correct heading styles throughout the document body.
 

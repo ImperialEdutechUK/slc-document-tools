@@ -516,7 +516,10 @@ FOOTER_CONTENT_WIDTH_TWIPS = FOOTER_PAGE_WIDTH_TWIPS - (2 * FOOTER_PAGE_MARGIN_T
 # Preserve the original SLC footer style from the reference course PDFs:
 # equal outer zones and a centred middle zone. The left/right zones mirror on
 # odd/even pages, while the course title remains geometrically centred on the
-# page. The side widths must therefore stay identical.
+# page. Keep the original 25% / 50% / 25% geometry so the visible SLC
+# footer design is unchanged. LibreOffice can still wrap long footer text
+# despite w:noWrap, so the title/copyright runs use a very small horizontal
+# text-scale safeguard while retaining the original font family and point size.
 FOOTER_PAGE_COL_TWIPS = FOOTER_CONTENT_WIDTH_TWIPS * 25 // 100
 FOOTER_COPYRIGHT_COL_TWIPS = FOOTER_PAGE_COL_TWIPS
 FOOTER_CENTER_COL_TWIPS = (
@@ -548,12 +551,13 @@ def _footer_display_course_name(course_name):
 
 
 def _footer_course_font_half_points(course_name):
-    """Keep the original 8 pt footer style whenever the title fits.
+    """Keep the original 8 pt footer style whenever practical.
 
     Long titles first lose only the leading ``Level X`` token via
-    ``_footer_display_course_name``. Font reduction is a last-resort fallback
-    for unusually long remaining titles so the footer never creates a second
-    line.
+    ``_footer_display_course_name``. The one-line safeguard primarily uses
+    horizontal text scaling, so the original 8 pt size is retained for the
+    common long-title range. Font reduction remains a last-resort fallback for
+    unusually long titles.
     """
     length = len(" ".join(str(course_name or "").split()))
     if length <= 64:
@@ -569,6 +573,23 @@ def _footer_course_font_half_points(course_name):
     if length <= 132:
         return 11  # 5.5 pt
     return 10      # 5 pt for unusually long titles
+
+
+def _footer_course_width_percent(course_name):
+    """Return conservative horizontal scaling for one-line footer titles.
+
+    Short titles keep 100% character width. Longer titles retain the same
+    point size but are condensed slightly; this is much less visually
+    disruptive than wrapping onto a second line.
+    """
+    length = len(" ".join(str(course_name or "").split()))
+    if length <= 52:
+        return 100
+    if length <= 64:
+        return 90
+    if length <= 88:
+        return 88
+    return 85
 
 
 def make_footer_xml(course_name, page_on_right):
@@ -587,15 +608,16 @@ def make_footer_xml(course_name, page_on_right):
     display_course_name = _footer_display_course_name(course_name)
     cn = display_course_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     course_font_size = str(_footer_course_font_half_points(display_course_name))
+    course_width_percent = str(_footer_course_width_percent(display_course_name))
     # Non-breaking spaces are intentional: LibreOffice can ignore w:noWrap
     # in some table-cell layouts, but NBSPs make the copyright text physically
     # unbreakable while looking identical to normal spaces.
     # Copyright remains at the original 8 pt Garamond footer size. NBSPs
     # preserve the exact one-line appearance without changing visible styling.
-    slc = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t>©\u00a0South\u00a0London\u00a0College\u00a0Ltd</w:t></w:r>'
+    slc = '<w:r><w:rPr><w:sz w:val="16"/><w:szCs w:val="16"/><w:w w:val="95"/></w:rPr><w:t>©\u00a0South\u00a0London\u00a0College\u00a0Ltd</w:t></w:r>'
     crs = (
         '<w:r><w:rPr><w:sz w:val="' + course_font_size + '"/>'
-        '<w:szCs w:val="' + course_font_size + '"/></w:rPr>'
+        '<w:szCs w:val="' + course_font_size + '"/><w:w w:val="' + course_width_percent + '"/></w:rPr>'
         '<w:t xml:space="preserve">' + cn + '</w:t></w:r>'
     )
 
