@@ -38,6 +38,9 @@ type FooterSettings = {
   copyright_text: string;
   page_label: string;
   footer_parts: number;
+  page_offset: number;
+  course_offset: number;
+  copyright_offset: number;
 };
 
 const API_BASE = (
@@ -318,6 +321,9 @@ function FormatterPanel() {
     copyright_text: "© South London College Ltd",
     page_label: " | Page",
     footer_parts: 0,
+    page_offset: 0,
+    course_offset: 0,
+    copyright_offset: 0,
   });
 
   const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
@@ -346,6 +352,9 @@ function FormatterPanel() {
       copyright_text: "© South London College Ltd",
       page_label: " | Page",
       footer_parts: 0,
+      page_offset: 0,
+      course_offset: 0,
+      copyright_offset: 0,
     });
     setPreviewUrl((current) => {
       if (current) {
@@ -493,6 +502,7 @@ function FormatterPanel() {
 
   async function applySimpleEdit(
     action:
+      | "heading1"
       | "bullets"
       | "numbering"
       | "normal"
@@ -622,6 +632,9 @@ function FormatterPanel() {
           result.copyright_text ?? "© South London College Ltd",
         page_label: result.page_label ?? " | Page",
         footer_parts: result.footer_parts ?? 0,
+        page_offset: result.page_offset ?? 0,
+        course_offset: result.course_offset ?? 0,
+        copyright_offset: result.copyright_offset ?? 0,
       });
       setFooterEditorOpen(true);
     } catch (err) {
@@ -631,6 +644,30 @@ function FormatterPanel() {
     } finally {
       setFooterBusy(false);
     }
+  }
+
+  function adjustFooterOffset(
+    field: "page_offset" | "course_offset" | "copyright_offset",
+    delta: number
+  ) {
+    setFooterSettings((current) => ({
+      ...current,
+      [field]: Math.max(-6, Math.min(6, current[field] + delta)),
+    }));
+  }
+
+  function resetFooterOffsets() {
+    setFooterSettings((current) => ({
+      ...current,
+      page_offset: 0,
+      course_offset: 0,
+      copyright_offset: 0,
+    }));
+  }
+
+  function footerOffsetLabel(value: number) {
+    if (value === 0) return "Default";
+    return value < 0 ? `${Math.abs(value)} left` : `${value} right`;
   }
 
   async function saveFooterEdit() {
@@ -651,6 +688,9 @@ function FormatterPanel() {
             course_text: footerSettings.course_text,
             copyright_text: footerSettings.copyright_text,
             page_label: footerSettings.page_label,
+            page_offset: footerSettings.page_offset,
+            course_offset: footerSettings.course_offset,
+            copyright_offset: footerSettings.copyright_offset,
           }),
         }
       );
@@ -1043,8 +1083,8 @@ function FormatterPanel() {
                       <div>
                         <h4>Document editor</h4>
                         <p>
-                          Edit paragraph text, add new lines, change lists and
-                          page flow, update the footer, or refresh the Table of
+                          Edit paragraph text, add new lines, apply Heading 1, change
+                          lists and page flow, update the footer, or refresh the Table of
                           Contents. The preview refreshes after each saved edit.
                         </p>
                       </div>
@@ -1065,6 +1105,15 @@ function FormatterPanel() {
                           onClick={openTextEditor}
                         >
                           Edit text / next line
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("heading1")}
+                        >
+                          Heading 1
                         </button>
 
                         <button
@@ -1226,8 +1275,8 @@ function FormatterPanel() {
                           <div>
                             <h5>Edit footer</h5>
                             <p>
-                              Update the course text, copyright text and page
-                              label used in the generated footer.
+                              Update footer text and make small left/right
+                              position adjustments without changing the SLC style.
                             </p>
                           </div>
 
@@ -1264,17 +1313,79 @@ function FormatterPanel() {
                           </label>
 
                           <label className="input-label">
-                            Page label
-                            <input
-                              value={footerSettings.page_label}
-                              onChange={(event) =>
-                                setFooterSettings((current) => ({
-                                  ...current,
-                                  page_label: event.target.value,
-                                }))
-                              }
-                            />
+                            Page number format
+                            <input value="1 | Page" readOnly aria-readonly="true" />
+                            <span className="input-hint">
+                              Fixed format. Page numbers update automatically: 1 | Page, 2 | Page, 3 | Page…
+                            </span>
                           </label>
+                        </div>
+
+                        <div className="footer-position-section">
+                          <div className="footer-position-heading">
+                            <div>
+                              <strong>Footer spacing / position</strong>
+                              <span>
+                                Nudge an item left or right if it does not look visually centred.
+                                The footer style itself stays unchanged.
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="button secondary small"
+                              disabled={editApplyBusy}
+                              onClick={resetFooterOffsets}
+                            >
+                              Reset positions
+                            </button>
+                          </div>
+
+                          <div className="footer-position-grid">
+                            {[
+                              ["Page number", "page_offset"],
+                              ["Course name", "course_offset"],
+                              ["Copyright", "copyright_offset"],
+                            ].map(([label, field]) => {
+                              const offsetField = field as
+                                | "page_offset"
+                                | "course_offset"
+                                | "copyright_offset";
+                              const value = footerSettings[offsetField];
+                              return (
+                                <div className="footer-position-control" key={offsetField}>
+                                  <span className="footer-position-label">{label}</span>
+                                  <div className="footer-position-stepper">
+                                    <button
+                                      type="button"
+                                      className="position-button"
+                                      aria-label={`Move ${label.toLowerCase()} left`}
+                                      disabled={editApplyBusy || value <= -6}
+                                      onClick={() => adjustFooterOffset(offsetField, -1)}
+                                    >
+                                      − Left
+                                    </button>
+                                    <output aria-live="polite">
+                                      {footerOffsetLabel(value)}
+                                    </output>
+                                    <button
+                                      type="button"
+                                      className="position-button"
+                                      aria-label={`Move ${label.toLowerCase()} right`}
+                                      disabled={editApplyBusy || value >= 6}
+                                      onClick={() => adjustFooterOffset(offsetField, 1)}
+                                    >
+                                      Right +
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          <p className="footer-position-hint">
+                            Each click adds or removes a small amount of horizontal space. Save the footer
+                            to refresh the preview, or use Reset positions to restore the original alignment.
+                          </p>
                         </div>
 
                         <div className="editor-subpanel-actions">

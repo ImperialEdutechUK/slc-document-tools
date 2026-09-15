@@ -41,7 +41,7 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.09.11-v7-expanded-document-editor"
+BUILD_VERSION = "2026.09.15-v12-footer-position-controls"
 
 app = FastAPI(title=APP_NAME, version="0.5.0")
 
@@ -524,6 +524,9 @@ def edit_document_footer(
             course_text=request.course_text,
             copyright_text=request.copyright_text,
             page_label=request.page_label,
+            page_offset=request.page_offset,
+            course_offset=request.course_offset,
+            copyright_offset=request.copyright_offset,
         )
 
         source_stem = _safe_stem(source_job.output_filename)
@@ -545,6 +548,9 @@ def edit_document_footer(
         details["footer_edit"] = {
             "footer_parts_changed": changed_parts,
             "source_job_id": source_job.id,
+            "page_offset": request.page_offset,
+            "course_offset": request.course_offset,
+            "copyright_offset": request.copyright_offset,
         }
 
         edit_job = _complete_job(

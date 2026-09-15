@@ -61,6 +61,64 @@ class SimpleEditingTests(unittest.TestCase):
         )
         self.assertFalse(final["page_break_before"])
 
+    def test_can_apply_heading1_style_and_remove_list_numbering(self):
+        payload = make_docx()
+        paragraph = next(
+            item
+            for item in get_editable_paragraphs(payload)
+            if item["text"] == "Body paragraph"
+        )
+
+        numbered, _ = apply_simple_edits(
+            payload, [paragraph["index"]], "numbering"
+        )
+        numbered_paragraph = next(
+            item
+            for item in get_editable_paragraphs(numbered)
+            if item["text"] == "Body paragraph"
+        )
+        self.assertEqual("number", numbered_paragraph["list_type"])
+
+        heading, changed = apply_simple_edits(
+            numbered, [numbered_paragraph["index"]], "heading1"
+        )
+        self.assertEqual(1, changed)
+        updated = next(
+            item
+            for item in get_editable_paragraphs(heading)
+            if item["text"] == "Body paragraph"
+        )
+        self.assertEqual("Heading1", updated["style"])
+        self.assertEqual("none", updated["list_type"])
+
+    def test_normal_text_can_revert_heading1(self):
+        payload = make_docx()
+        paragraph = next(
+            item
+            for item in get_editable_paragraphs(payload)
+            if item["text"] == "Body paragraph"
+        )
+        heading, _ = apply_simple_edits(
+            payload, [paragraph["index"]], "heading1"
+        )
+        heading_paragraph = next(
+            item
+            for item in get_editable_paragraphs(heading)
+            if item["text"] == "Body paragraph"
+        )
+
+        normal, changed = apply_simple_edits(
+            heading, [heading_paragraph["index"]], "normal"
+        )
+        self.assertEqual(1, changed)
+        updated = next(
+            item
+            for item in get_editable_paragraphs(normal)
+            if item["text"] == "Body paragraph"
+        )
+        self.assertEqual("Normal", updated["style"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -183,7 +241,144 @@ class ExpandedEditingTests(unittest.TestCase):
         updated = get_footer_settings(edited)
         self.assertEqual("New Course Name", updated["course_text"])
         self.assertEqual("© SLC Test", updated["copyright_text"])
-        self.assertEqual(" | Pg", updated["page_label"])
+        # Page numbering is brand-locked to: 1 | Page, 2 | Page, ...
+        self.assertEqual(" | Page", updated["page_label"])
+
+    def test_footer_edit_normalises_page_field_to_number_then_page_label(self):
+        from docx import Document as WordDocument
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from app.formatter.simple_editing import edit_footer, wt
+
+        doc = WordDocument()
+        doc.add_paragraph("Body")
+        footer = doc.sections[0].footer
+        table = footer.add_table(rows=1, cols=3, width=doc.sections[0].page_width)
+        table.cell(0, 0).text = "© South London College Ltd"
+        table.cell(0, 1).text = "Course"
+        page_paragraph = table.cell(0, 2).paragraphs[0]
+        page_paragraph.add_run("Page | ")
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        instr = OxmlElement("w:instrText")
+        instr.text = " PAGE "
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        run = page_paragraph.add_run()
+        run._r.extend([begin, instr, separate])
+        page_paragraph.add_run("1")
+        page_paragraph.add_run()._r.append(end)
+
+        buffer = BytesIO()
+        doc.save(buffer)
+        edited, _ = edit_footer(
+            buffer.getvalue(),
+            course_text="Course",
+            copyright_text="© South London College Ltd",
+            page_label="anything",
+        )
+
+        with zipfile.ZipFile(BytesIO(edited), "r") as archive:
+            footer_name = next(name for name in archive.namelist() if "footer" in name and name.endswith(".xml"))
+            root = ET.fromstring(archive.read(footer_name))
+            page_cell = next(cell for cell in root.iter(wt("tc")) if any("PAGE" in (n.text or "").upper() for n in cell.iter(wt("instrText"))))
+            visible = "".join(n.text or "" for n in page_cell.iter(wt("t")))
+            self.assertEqual("1 | Page", visible)
+
+    def test_long_footer_edit_removes_level_token_to_prevent_wrapping(self):
+        from docx import Document as WordDocument
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from app.formatter.simple_editing import edit_footer, get_footer_settings
+
+        doc = WordDocument()
+        doc.add_paragraph("Body")
+        footer = doc.sections[0].footer
+        table = footer.add_table(rows=1, cols=3, width=doc.sections[0].page_width)
+        table.cell(0, 0).text = "© South London College Ltd"
+        table.cell(0, 1).text = "Old Course Name"
+        page_paragraph = table.cell(0, 2).paragraphs[0]
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        instr = OxmlElement("w:instrText")
+        instr.set(qn("xml:space"), "preserve")
+        instr.text = " PAGE "
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        run = page_paragraph.add_run()
+        run._r.extend([begin, instr, separate])
+        page_paragraph.add_run("1")
+        page_paragraph.add_run(" | Page")
+        page_paragraph.add_run()._r.append(end)
+
+        buffer = BytesIO()
+        doc.save(buffer)
+        payload = buffer.getvalue()
+
+        edited, _ = edit_footer(
+            payload,
+            course_text="Level 5 Extended Diploma in Education and Training Management (RQF)",
+            copyright_text="© South London College Ltd",
+            page_label=" | Page",
+        )
+        updated = get_footer_settings(edited)
+        self.assertEqual(
+            "Extended Diploma in Education and Training Management (RQF)",
+            updated["course_text"],
+        )
+
+    def test_footer_position_offsets_round_trip(self):
+        from docx import Document as WordDocument
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from app.formatter.simple_editing import edit_footer, get_footer_settings
+
+        doc = WordDocument()
+        doc.add_paragraph("Body")
+        footer = doc.sections[0].footer
+        table = footer.add_table(rows=1, cols=3, width=doc.sections[0].page_width)
+        table.cell(0, 0).text = "© South London College Ltd"
+        table.cell(0, 1).text = "Course Name"
+
+        page_paragraph = table.cell(0, 2).paragraphs[0]
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        instr = OxmlElement("w:instrText")
+        instr.text = " PAGE "
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        run = page_paragraph.add_run()
+        run._r.extend([begin, instr, separate])
+        page_paragraph.add_run("1")
+        page_paragraph.add_run(" | Page")
+        page_paragraph.add_run()._r.append(end)
+
+        buffer = BytesIO()
+        doc.save(buffer)
+        edited, changed_parts = edit_footer(
+            buffer.getvalue(),
+            course_text="Course Name",
+            copyright_text="© South London College Ltd",
+            page_label=" | Page",
+            page_offset=2,
+            course_offset=-3,
+            copyright_offset=1,
+        )
+        self.assertGreaterEqual(changed_parts, 1)
+
+        settings = get_footer_settings(edited)
+        self.assertEqual(2, settings["page_offset"])
+        self.assertEqual(-3, settings["course_offset"])
+        self.assertEqual(1, settings["copyright_offset"])
+        self.assertEqual(" | Page", settings["page_label"])
 
     def test_can_regenerate_toc_from_current_heading_text(self):
         import zipfile

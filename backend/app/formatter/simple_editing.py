@@ -521,7 +521,10 @@ _FOOTER_PAGE_WIDTH_TWIPS = 11906
 _FOOTER_PAGE_MARGIN_TWIPS = 1440
 _FOOTER_CONTENT_WIDTH_TWIPS = _FOOTER_PAGE_WIDTH_TWIPS - (2 * _FOOTER_PAGE_MARGIN_TWIPS)
 # Match the original SLC footer geometry: equal left/right zones around a
-# truly centred course-title zone. Odd/even pages mirror content, not widths.
+# truly centred course-title zone. Keep the original 25% / 50% / 25%
+# geometry. LibreOffice can still wrap long text despite w:noWrap, so the
+# footer runs also use a small horizontal text-scale safeguard. Odd/even pages
+# mirror content, not widths; the visible footer positions remain unchanged.
 _FOOTER_PAGE_COL_TWIPS = _FOOTER_CONTENT_WIDTH_TWIPS * 25 // 100
 _FOOTER_COPYRIGHT_COL_TWIPS = _FOOTER_PAGE_COL_TWIPS
 _FOOTER_CENTER_COL_TWIPS = (
@@ -532,6 +535,12 @@ _FOOTER_CENTER_COL_TWIPS = (
 _FOOTER_FULL_TITLE_CHAR_LIMIT = 60
 _FOOTER_PAGE_LABEL = " | Page"
 _FOOTER_LEVEL_RE = re.compile(r"\bLevel\s+(?:\d+(?:\.\d+)?|[IVXLC]+)\b\s*", re.IGNORECASE)
+# Manual footer-position controls use small, reversible paragraph indents.
+# One step is deliberately subtle so users can visually nudge a footer item
+# without changing the branded table geometry or forcing text onto a new line.
+_FOOTER_OFFSET_STEP_TWIPS = 25
+_FOOTER_OFFSET_MIN_STEPS = -6
+_FOOTER_OFFSET_MAX_STEPS = 6
 
 
 def _footer_display_course_name(course_name: str) -> str:
@@ -544,8 +553,9 @@ def _footer_display_course_name(course_name: str) -> str:
 
 
 def _footer_course_font_half_points(course_name: str) -> int:
-    # Preserve the source footer's 8 pt Garamond size whenever possible.
-    # Only reduce it after the optional Level X trim has already been applied.
+    # Preserve the source footer's 8 pt Garamond size whenever practical.
+    # Long titles are handled first by Level X trimming and small horizontal
+    # scaling; point-size reduction is only a final fallback.
     length = len(" ".join(str(course_name or "").split()))
     if length <= 64:
         return 16
@@ -560,6 +570,17 @@ def _footer_course_font_half_points(course_name: str) -> int:
     if length <= 132:
         return 11
     return 10
+
+
+def _footer_course_width_percent(course_name: str) -> int:
+    length = len(" ".join(str(course_name or "").split()))
+    if length <= 52:
+        return 100
+    if length <= 64:
+        return 90
+    if length <= 88:
+        return 88
+    return 85
 
 
 def _footer_display_copyright(copyright_text: str) -> str:
@@ -605,8 +626,9 @@ def _set_footer_cell_layout(cell: ET.Element, width: int, *, fit_text: bool = Fa
 
 def _set_footer_course_font(cell: ET.Element, course_text: str) -> None:
     size = str(_footer_course_font_half_points(course_text))
+    width_percent = str(_footer_course_width_percent(course_text))
     for run in cell.iter(wt("r")):
-        # Only resize runs carrying visible title text.
+        # Only resize/condense runs carrying visible title text.
         if not any((node.text or "") for node in run.findall(wt("t"))):
             continue
         r_pr = run.find(wt("rPr"))
@@ -617,6 +639,8 @@ def _set_footer_course_font(cell: ET.Element, course_text: str) -> None:
         sz.set(wt("val"), size)
         sz_cs = _ensure_xml_child(r_pr, "szCs")
         sz_cs.set(wt("val"), size)
+        width = _ensure_xml_child(r_pr, "w")
+        width.set(wt("val"), width_percent)
 
 
 
@@ -630,6 +654,183 @@ def _set_run_font_size(run: ET.Element, half_points: str) -> None:
     sz.set(wt("val"), half_points)
     sz_cs = _ensure_xml_child(r_pr, "szCs")
     sz_cs.set(wt("val"), half_points)
+
+
+def _set_run_width_percent(run: ET.Element, percent: str) -> None:
+    r_pr = run.find(wt("rPr"))
+    if r_pr is None:
+        r_pr = ET.Element(wt("rPr"))
+        run.insert(0, r_pr)
+    width = _ensure_xml_child(r_pr, "w")
+    width.set(wt("val"), percent)
+
+
+def _clamp_footer_offset_steps(value: int | float | str | None) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    return max(_FOOTER_OFFSET_MIN_STEPS, min(_FOOTER_OFFSET_MAX_STEPS, parsed))
+
+
+def _footer_cell_paragraph(cell: ET.Element) -> ET.Element:
+    paragraph = cell.find(wt("p"))
+    if paragraph is None:
+        paragraph = ET.SubElement(cell, wt("p"))
+    return paragraph
+
+
+def _footer_paragraph_alignment(paragraph: ET.Element) -> str:
+    p_pr = paragraph.find(wt("pPr"))
+    jc = p_pr.find(wt("jc")) if p_pr is not None else None
+    return jc.get(wt("val"), "left") if jc is not None else "left"
+
+
+def _set_footer_horizontal_offset(cell: ET.Element, steps: int) -> None:
+    """Nudge one footer item left/right while preserving its cell and style.
+
+    The user-facing value is a small number of steps. Positive values move the
+    visible item to the right; negative values move it to the left. Using
+    paragraph indents instead of literal spaces keeps PAGE fields intact and
+    avoids reintroducing the LibreOffice wrapping problem.
+    """
+    steps = _clamp_footer_offset_steps(steps)
+    paragraph = _footer_cell_paragraph(cell)
+    p_pr = paragraph.find(wt("pPr"))
+    if p_pr is None:
+        p_pr = ET.Element(wt("pPr"))
+        paragraph.insert(0, p_pr)
+
+    ind = p_pr.find(wt("ind"))
+    if ind is None:
+        ind = ET.Element(wt("ind"))
+        p_pr.append(ind)
+
+    # Remove only the horizontal indentation attributes managed by this tool;
+    # preserve any first-line/hanging values that may exist in unusual source
+    # documents.
+    for attr in ("left", "right", "start", "end"):
+        ind.attrib.pop(wt(attr), None)
+
+    if steps == 0:
+        if not ind.attrib:
+            p_pr.remove(ind)
+        return
+
+    offset = steps * _FOOTER_OFFSET_STEP_TWIPS
+    alignment = _footer_paragraph_alignment(paragraph)
+
+    if alignment == "center":
+        # A centred paragraph moves by half the left/right indent difference,
+        # so apply twice the requested amount on the appropriate side.
+        if offset > 0:
+            ind.set(wt("left"), str(offset * 2))
+        else:
+            ind.set(wt("right"), str((-offset) * 2))
+    elif alignment == "right":
+        # Right-aligned text is positioned from the right edge. A negative
+        # right indent moves it outward/right; a positive value moves left.
+        ind.set(wt("right"), str(-offset))
+    else:
+        # Left-aligned text moves directly with its left indent. Word and
+        # LibreOffice both accept a small signed value here.
+        ind.set(wt("left"), str(offset))
+
+
+def _get_footer_horizontal_offset(cell: ET.Element) -> int:
+    paragraph = cell.find(wt("p"))
+    if paragraph is None:
+        return 0
+    p_pr = paragraph.find(wt("pPr"))
+    ind = p_pr.find(wt("ind")) if p_pr is not None else None
+    if ind is None:
+        return 0
+
+    def _twips(attr: str) -> int:
+        try:
+            return int(ind.get(wt(attr), "0") or "0")
+        except ValueError:
+            return 0
+
+    left = _twips("left") or _twips("start")
+    right = _twips("right") or _twips("end")
+    alignment = _footer_paragraph_alignment(paragraph)
+    if alignment == "center":
+        twips = (left - right) / 2
+    elif alignment == "right":
+        twips = -right
+    else:
+        twips = left
+    return _clamp_footer_offset_steps(round(twips / _FOOTER_OFFSET_STEP_TWIPS))
+
+
+def _set_footer_course_offset(root: ET.Element, steps: int) -> None:
+    """Move the centre footer zone without narrowing the course-title cell.
+
+    Paragraph indents make LibreOffice wrap long course names. Instead, keep
+    the middle cell at its original 50% width and transfer a very small amount
+    of width between the two outer cells. This moves the entire centre zone
+    left/right while preserving the one-line course title.
+    """
+    steps = _clamp_footer_offset_steps(steps)
+    shift = steps * _FOOTER_OFFSET_STEP_TWIPS
+    for table in root.iter(wt("tbl")):
+        row = table.find(wt("tr"))
+        if row is None:
+            continue
+        cells = row.findall(wt("tc"))
+        if len(cells) != 3:
+            continue
+        kinds = [_classify_footer_cell(cell) for cell in cells]
+        if kinds[1] != "course" or "page" not in kinds:
+            continue
+
+        widths = [
+            _FOOTER_PAGE_COL_TWIPS + shift,
+            _FOOTER_CENTER_COL_TWIPS,
+            _FOOTER_COPYRIGHT_COL_TWIPS - shift,
+        ]
+        for cell, width in zip(cells, widths):
+            tc_pr = cell.find(wt("tcPr"))
+            if tc_pr is None:
+                tc_pr = ET.Element(wt("tcPr"))
+                cell.insert(0, tc_pr)
+            tc_w = _ensure_xml_child(tc_pr, "tcW", first=True)
+            tc_w.set(wt("w"), str(width))
+            tc_w.set(wt("type"), "dxa")
+
+        grid = table.find(wt("tblGrid"))
+        if grid is None:
+            grid = ET.Element(wt("tblGrid"))
+            table.insert(1 if table.find(wt("tblPr")) is not None else 0, grid)
+        for child in list(grid):
+            grid.remove(child)
+        for width in widths:
+            ET.SubElement(grid, wt("gridCol")).set(wt("w"), str(width))
+
+
+def _get_footer_course_offset(root: ET.Element) -> int:
+    for table in root.iter(wt("tbl")):
+        row = table.find(wt("tr"))
+        if row is None:
+            continue
+        cells = row.findall(wt("tc"))
+        if len(cells) != 3:
+            continue
+        kinds = [_classify_footer_cell(cell) for cell in cells]
+        if kinds[1] != "course" or "page" not in kinds:
+            continue
+        tc_pr = cells[0].find(wt("tcPr"))
+        tc_w = tc_pr.find(wt("tcW")) if tc_pr is not None else None
+        if tc_w is None:
+            return 0
+        try:
+            left_width = int(tc_w.get(wt("w"), str(_FOOTER_PAGE_COL_TWIPS)))
+        except ValueError:
+            return 0
+        shift = left_width - _FOOTER_PAGE_COL_TWIPS
+        return _clamp_footer_offset_steps(round(shift / _FOOTER_OFFSET_STEP_TWIPS))
+    return 0
 
 
 def _normalise_page_number_cell(cell: ET.Element) -> bool:
@@ -720,6 +921,7 @@ def _normalise_footer_table_layout(root: ET.Element) -> None:
                 for run in cell.iter(wt("r")):
                     if any((node.text or "") for node in run.findall(wt("t"))):
                         _set_run_font_size(run, "16")
+                        _set_run_width_percent(run, "95")
             else:
                 width = _FOOTER_CENTER_COL_TWIPS
                 _set_footer_cell_layout(cell, width, fit_text=True)
@@ -846,13 +1048,23 @@ def get_footer_settings(docx_bytes: bytes) -> dict:
                     "copyright_text": "",
                     "page_label": _FOOTER_PAGE_LABEL,
                     "footer_parts": 0,
+                    "page_offset": 0,
+                    "course_offset": 0,
+                    "copyright_offset": 0,
                 }
 
             course_text = ""
             copyright_text = ""
             page_label = _FOOTER_PAGE_LABEL
+            offsets: dict[str, int | None] = {
+                "page": None,
+                "course": None,
+                "copyright": None,
+            }
             for name in footer_names:
                 root = ET.fromstring(archive.read(name))
+                if offsets["course"] is None:
+                    offsets["course"] = _get_footer_course_offset(root)
                 for cell in root.iter(wt("tc")):
                     kind = _classify_footer_cell(cell)
                     if kind == "course" and not course_text:
@@ -862,12 +1074,17 @@ def get_footer_settings(docx_bytes: bytes) -> dict:
                     elif kind == "page":
                         # Page-number format is fixed to: 1 | Page, 2 | Page, ...
                         page_label = _FOOTER_PAGE_LABEL
+                    if kind in {"page", "copyright"} and offsets[kind] is None:
+                        offsets[kind] = _get_footer_horizontal_offset(cell)
 
             return {
                 "course_text": course_text,
                 "copyright_text": copyright_text,
                 "page_label": page_label,
                 "footer_parts": len(footer_names),
+                "page_offset": int(offsets["page"] or 0),
+                "course_offset": int(offsets["course"] or 0),
+                "copyright_offset": int(offsets["copyright"] or 0),
             }
     except (zipfile.BadZipFile, ET.ParseError) as exc:
         raise SimpleEditingError("The document footer could not be read.") from exc
@@ -879,6 +1096,9 @@ def edit_footer(
     course_text: str,
     copyright_text: str,
     page_label: str,
+    page_offset: int = 0,
+    course_offset: int = 0,
+    copyright_offset: int = 0,
 ) -> tuple[bytes, int]:
     try:
         source = zipfile.ZipFile(BytesIO(docx_bytes), "r")
@@ -911,6 +1131,21 @@ def edit_footer(
             # Re-apply the branded footer geometry after an edit. This keeps
             # the original visual style while enforcing the single-line rule.
             _normalise_footer_table_layout(root)
+
+            # Apply user-controlled horizontal spacing only after the branded
+            # footer has been normalised. This preserves the 25/50/25 table,
+            # teal rule, one-line safeguards, font settings and odd/even
+            # mirroring while allowing small visual position corrections.
+            _set_footer_course_offset(root, course_offset)
+            role_offsets = {
+                "page": _clamp_footer_offset_steps(page_offset),
+                "copyright": _clamp_footer_offset_steps(copyright_offset),
+            }
+            for cell in root.iter(wt("tc")):
+                kind = _classify_footer_cell(cell)
+                if kind in role_offsets:
+                    _set_footer_horizontal_offset(cell, role_offsets[kind])
+
             after_xml = ET.tostring(root, encoding="UTF-8")
             changed = changed or before_xml != after_xml
 

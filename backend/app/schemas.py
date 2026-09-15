@@ -35,3 +35,6 @@ class FooterEditRequest(BaseModel):
     course_text: str = ""
     copyright_text: str = "© South London College Ltd"
     page_label: str = " | Page"
+    page_offset: int = Field(default=0, ge=-6, le=6)
+    course_offset: int = Field(default=0, ge=-6, le=6)
+    copyright_offset: int = Field(default=0, ge=-6, le=6)
