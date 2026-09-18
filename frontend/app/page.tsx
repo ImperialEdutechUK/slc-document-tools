@@ -33,6 +33,12 @@ type EditableParagraph = {
   keep_together: boolean;
 };
 
+type SpacingIssue = {
+  kind: "extra_blank" | "multi_break" | "blank_page" | "orphan_heading" | "split_paragraph";
+  paragraph_index: number;
+  description: string;
+};
+
 type FooterSettings = {
   course_text: string;
   copyright_text: string;
@@ -315,7 +321,6 @@ function FormatterPanel() {
   const [textEditorOpen, setTextEditorOpen] = useState(false);
   const [textDraft, setTextDraft] = useState("");
   const [footerEditorOpen, setFooterEditorOpen] = useState(false);
-  const [manualFooterControlsOpen, setManualFooterControlsOpen] = useState(false);
   const [footerBusy, setFooterBusy] = useState(false);
   const [footerSettings, setFooterSettings] = useState<FooterSettings>({
     course_text: "",
@@ -327,7 +332,17 @@ function FormatterPanel() {
     copyright_offset: 0,
   });
 
-  const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
+  const [spacingEditorOpen, setSpacingEditorOpen] = useState(false);
+  const [spacingBusy, setSpacingBusy] = useState(false);
+  const [spacingIssues, setSpacingIssues] = useState<SpacingIssue[]>([]);
+  const [spacingChecked, setSpacingChecked] = useState(false);
+  const [spacingFixOpts, setSpacingFixOpts] = useState({
+    remove_extra_blanks: true,
+    remove_multi_breaks: true,
+    fix_orphan_headings: true,
+  });
+
+    const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
 
   useEffect(() => {
     return () => {
@@ -348,7 +363,9 @@ function FormatterPanel() {
     setTextEditorOpen(false);
     setTextDraft("");
     setFooterEditorOpen(false);
-    setManualFooterControlsOpen(false);
+    setSpacingEditorOpen(false);
+    setSpacingIssues([]);
+    setSpacingChecked(false);
     setFooterSettings({
       course_text: "",
       copyright_text: "© South London College Ltd",
@@ -611,12 +628,48 @@ function FormatterPanel() {
     }
   }
 
-  async function toggleFooterEditor() {
+  async function checkPageSpacing() {
+    if (!job) return;
+    setSpacingBusy(true);
+    setSpacingIssues([]);
+    setSpacingChecked(false);
+    try {
+      const data = await apiRequest(`/api/v1/jobs/${job.id}/spacing-issues`, { method: "GET" });
+      setSpacingIssues(data.issues || []);
+      setSpacingChecked(true);
+    } catch (err) {
+      setEditMessage(err instanceof Error ? err.message : "Spacing check failed.");
+    } finally {
+      setSpacingBusy(false);
+    }
+  }
+
+  async function applySpacingClean() {
+    if (!job) return;
+    setSpacingBusy(true);
+    try {
+      const result = await apiRequest(`/api/v1/jobs/${job.id}/clean-spacing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spacingFixOpts),
+      });
+      setJob(result);
+      setSpacingChecked(false);
+      setSpacingIssues([]);
+      setSpacingEditorOpen(false);
+      await previewFormattedDocument();
+    } catch (err) {
+      setEditMessage(err instanceof Error ? err.message : "Spacing clean failed.");
+    } finally {
+      setSpacingBusy(false);
+    }
+  }
+
+    async function toggleFooterEditor() {
     if (!job) return;
 
     if (footerEditorOpen) {
       setFooterEditorOpen(false);
-      setManualFooterControlsOpen(false);
       return;
     }
 
@@ -640,7 +693,6 @@ function FormatterPanel() {
         copyright_offset: result.copyright_offset ?? 0,
       });
       setFooterEditorOpen(true);
-      setManualFooterControlsOpen(false);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "The footer could not be loaded."
@@ -667,25 +719,6 @@ function FormatterPanel() {
       course_offset: 0,
       copyright_offset: 0,
     }));
-  }
-
-  function setFooterOffsetManual(
-    field: "page_offset" | "course_offset" | "copyright_offset",
-    rawValue: string
-  ) {
-    const parsed = Number.parseInt(rawValue, 10);
-    const safeValue = Number.isFinite(parsed)
-      ? Math.max(-6, Math.min(6, parsed))
-      : 0;
-
-    setFooterSettings((current) => ({
-      ...current,
-      [field]: safeValue,
-    }));
-  }
-
-  function footerPreviewShift(value: number) {
-    return { transform: `translateX(${value * 4}px)` };
   }
 
   function footerOffsetLabel(value: number) {
@@ -1236,7 +1269,7 @@ function FormatterPanel() {
                             ? "Loading footer…"
                             : footerEditorOpen
                             ? "Close footer editor"
-                            : "Edit footer manually"}
+                            : "Edit footer"}
                         </button>
 
                         <button
@@ -1246,6 +1279,18 @@ function FormatterPanel() {
                           onClick={updateTableOfContents}
                         >
                           Update TOC
+                        </button>
+
+                        <button
+                          type="button"
+                          className={`button small ${spacingEditorOpen ? "primary" : "secondary"}`}
+                          disabled={editApplyBusy || spacingBusy}
+                          onClick={() => {
+                            setSpacingEditorOpen((v) => !v);
+                            if (!spacingChecked && !spacingEditorOpen) checkPageSpacing();
+                          }}
+                        >
+                          {spacingBusy ? "Checking…" : spacingEditorOpen ? "Close spacing tool" : "Clean Page Spacing"}
                         </button>
                       </div>
                     </div>
@@ -1296,10 +1341,10 @@ function FormatterPanel() {
                       <div className="editor-subpanel">
                         <div className="editor-subpanel-heading">
                           <div>
-                            <h5>Edit footer manually</h5>
+                            <h5>Edit footer</h5>
                             <p>
-                              Edit the footer text directly and fine-tune each item
-                              without changing the SLC footer style.
+                              Update footer text and make small left/right
+                              position adjustments without changing the SLC style.
                             </p>
                           </div>
 
@@ -1342,42 +1387,6 @@ function FormatterPanel() {
                               Fixed format. Page numbers update automatically: 1 | Page, 2 | Page, 3 | Page…
                             </span>
                           </label>
-                        </div>
-
-                        <div className="footer-manual-preview" aria-label="Footer position preview">
-                          <div className="footer-manual-preview-heading">
-                            <div>
-                              <strong>Footer preview</strong>
-                              <span>
-                                Approximate on-screen guide. Save the footer to refresh the real DOCX/PDF preview.
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="footer-preview-paper">
-                            <div className="footer-preview-rule" />
-                            <div className="footer-preview-row">
-                              <span
-                                className="footer-preview-item footer-preview-left"
-                                style={footerPreviewShift(footerSettings.page_offset)}
-                              >
-                                1 | Page
-                              </span>
-                              <span
-                                className="footer-preview-item footer-preview-centre"
-                                style={footerPreviewShift(footerSettings.course_offset)}
-                                title={footerSettings.course_text}
-                              >
-                                {footerSettings.course_text || "Course name"}
-                              </span>
-                              <span
-                                className="footer-preview-item footer-preview-right"
-                                style={footerPreviewShift(footerSettings.copyright_offset)}
-                              >
-                                {footerSettings.copyright_text || "© South London College Ltd"}
-                              </span>
-                            </div>
-                          </div>
                         </div>
 
                         <div className="footer-position-section">
@@ -1445,69 +1454,6 @@ function FormatterPanel() {
                             Each click adds or removes a small amount of horizontal space. Save the footer
                             to refresh the preview, or use Reset positions to restore the original alignment.
                           </p>
-
-                          <div className="footer-manual-toggle-row">
-                            <button
-                              type="button"
-                              className="button secondary small"
-                              disabled={editApplyBusy}
-                              onClick={() =>
-                                setManualFooterControlsOpen((current) => !current)
-                              }
-                            >
-                              {manualFooterControlsOpen
-                                ? "Hide exact position controls"
-                                : "Enter positions manually"}
-                            </button>
-                            <span>
-                              Use exact values when the left/right buttons are not precise enough.
-                            </span>
-                          </div>
-
-                          {manualFooterControlsOpen && (
-                            <div className="footer-manual-grid">
-                              {[
-                                ["Page number", "page_offset"],
-                                ["Course name", "course_offset"],
-                                ["Copyright", "copyright_offset"],
-                              ].map(([label, field]) => {
-                                const offsetField = field as
-                                  | "page_offset"
-                                  | "course_offset"
-                                  | "copyright_offset";
-                                return (
-                                  <label className="footer-manual-field" key={offsetField}>
-                                    <span>{label} position</span>
-                                    <div className="footer-manual-input-row">
-                                      <input
-                                        type="number"
-                                        min={-6}
-                                        max={6}
-                                        step={1}
-                                        value={footerSettings[offsetField]}
-                                        onChange={(event) =>
-                                          setFooterOffsetManual(offsetField, event.target.value)
-                                        }
-                                      />
-                                      <input
-                                        className="footer-position-range"
-                                        type="range"
-                                        min={-6}
-                                        max={6}
-                                        step={1}
-                                        value={footerSettings[offsetField]}
-                                        onChange={(event) =>
-                                          setFooterOffsetManual(offsetField, event.target.value)
-                                        }
-                                        aria-label={`${label} exact position`}
-                                      />
-                                    </div>
-                                    <small>−6 = further left, 0 = default, +6 = further right</small>
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          )}
                         </div>
 
                         <div className="editor-subpanel-actions">
@@ -1517,7 +1463,7 @@ function FormatterPanel() {
                             disabled={editApplyBusy}
                             onClick={saveFooterEdit}
                           >
-                            {editApplyBusy ? "Saving…" : "Save footer & refresh preview"}
+                            {editApplyBusy ? "Saving…" : "Save footer"}
                           </button>
 
                           <button
@@ -1527,6 +1473,110 @@ function FormatterPanel() {
                             onClick={() => setFooterEditorOpen(false)}
                           >
                             Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {spacingEditorOpen && (
+                      <div className="editor-subpanel spacing-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Clean Page Spacing</h5>
+                            <p>
+                              Detect and fix spacing problems that break page layout. Run the
+                              check first, then apply selected fixes.
+                            </p>
+                          </div>
+                          {spacingChecked && (
+                            <span className={`selection-count ${spacingIssues.length === 0 ? "clean" : "warn"}`}>
+                              {spacingIssues.length === 0 ? "✓ No issues" : `${spacingIssues.length} issue${spacingIssues.length === 1 ? "" : "s"}`}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="spacing-checks">
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.remove_extra_blanks}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, remove_extra_blanks: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Remove extra blank paragraphs</strong>
+                              <small>Keep at most one blank line between blocks</small>
+                            </span>
+                          </label>
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.remove_multi_breaks}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, remove_multi_breaks: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Remove duplicate page breaks</strong>
+                              <small>Prevent blank pages caused by stacked page-break paragraphs</small>
+                            </span>
+                          </label>
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.fix_orphan_headings}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, fix_orphan_headings: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Fix orphaned headings</strong>
+                              <small>Keep headings attached to their first paragraph</small>
+                            </span>
+                          </label>
+                        </div>
+
+                        {spacingChecked && spacingIssues.length > 0 && (
+                          <div className="spacing-issues-list">
+                            {spacingIssues.map((issue, idx) => (
+                              <div key={idx} className={`spacing-issue spacing-issue-${issue.kind}`}>
+                                <span className="spacing-issue-badge">
+                                  {issue.kind === "extra_blank" && "Extra blank"}
+                                  {issue.kind === "multi_break" && "Multi-break"}
+                                  {issue.kind === "blank_page" && "Blank page"}
+                                  {issue.kind === "orphan_heading" && "Orphan heading"}
+                                  {issue.kind === "split_paragraph" && "Split paragraph"}
+                                </span>
+                                <span className="spacing-issue-desc">{issue.description}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {spacingChecked && spacingIssues.length === 0 && (
+                          <div className="spacing-clean-msg">
+                            ✓ No spacing issues detected. The document looks good.
+                          </div>
+                        )}
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={spacingBusy}
+                            onClick={checkPageSpacing}
+                          >
+                            {spacingBusy ? "Checking…" : "Re-check"}
+                          </button>
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={spacingBusy || (!spacingFixOpts.remove_extra_blanks && !spacingFixOpts.remove_multi_breaks && !spacingFixOpts.fix_orphan_headings)}
+                            onClick={applySpacingClean}
+                          >
+                            {spacingBusy ? "Applying…" : "Apply fixes"}
+                          </button>
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            onClick={() => setSpacingEditorOpen(false)}
+                          >
+                            Close
                           </button>
                         </div>
                       </div>

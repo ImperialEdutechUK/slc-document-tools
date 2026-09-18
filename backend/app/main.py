@@ -25,6 +25,8 @@ from .formatter.pdf_editing import PdfEditingError, get_pdf_page_count, remove_p
 from .formatter.simple_editing import (
     SimpleEditingError,
     apply_simple_edits,
+    check_page_spacing,
+    clean_page_spacing,
     edit_footer,
     get_editable_paragraphs,
     get_footer_settings,
@@ -32,7 +34,7 @@ from .formatter.simple_editing import (
     replace_paragraph_text,
 )
 from .models import Job
-from .schemas import FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest
+from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest
 from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
@@ -715,6 +717,89 @@ async def pdf_remove_pages(
     except (ValueError, PdfEditingError) as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/spacing-issues")
+def spacing_issues(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """Return a list of detected page-spacing issues for a formatted DOCX job."""
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Spacing checks are available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        issues = check_page_spacing(source_payload)
+        return {"job_id": source_job.id, "issues": issues, "total": len(issues)}
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/clean-spacing", response_model=JobResponse)
+def clean_document_spacing(
+    job_id: str,
+    request: CleanSpacingRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    """Apply automatic spacing fixes to a formatted DOCX job."""
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Spacing clean is available for DOCX files only.")
+
+    edit_job = _new_job(db, "clean_spacing", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = clean_page_spacing(
+            source_payload,
+            remove_extra_blanks=request.remove_extra_blanks,
+            remove_multi_breaks=request.remove_multi_breaks,
+            fix_orphan_headings=request.fix_orphan_headings,
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["clean_spacing"] = {
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+            "remove_extra_blanks": request.remove_extra_blanks,
+            "remove_multi_breaks": request.remove_multi_breaks,
+            "fix_orphan_headings": request.fix_orphan_headings,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except (StorageError, SimpleEditingError) as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Spacing clean failed.") from exc
 
 
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobResponse)

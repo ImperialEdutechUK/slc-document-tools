@@ -38,3 +38,9 @@ class FooterEditRequest(BaseModel):
     page_offset: int = Field(default=0, ge=-6, le=6)
     course_offset: int = Field(default=0, ge=-6, le=6)
     copyright_offset: int = Field(default=0, ge=-6, le=6)
+
+
+class CleanSpacingRequest(BaseModel):
+    remove_extra_blanks: bool = True
+    remove_multi_breaks: bool = True
+    fix_orphan_headings: bool = True

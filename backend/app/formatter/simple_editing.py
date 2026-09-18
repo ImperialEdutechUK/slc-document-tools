@@ -1300,3 +1300,286 @@ def regenerate_toc(docx_bytes: bytes) -> tuple[bytes, int]:
         raise SimpleEditingError("The Table of Contents could not be updated.") from exc
     finally:
         source.close()
+
+
+# ---------------------------------------------------------------------------
+# Clean Page Spacing
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SpacingIssue:
+    kind: str          # "extra_blank" | "multi_break" | "blank_page" | "orphan_heading" | "split_paragraph"
+    paragraph_index: int
+    description: str
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "paragraph_index": self.paragraph_index,
+            "description": self.description,
+        }
+
+
+def _paragraph_is_empty(paragraph: ET.Element) -> bool:
+    """True when the paragraph has no visible text and no inline drawing."""
+    text = _paragraph_text(paragraph)
+    if text:
+        return False
+    if paragraph.find(".//" + wt("drawing")) is not None:
+        return False
+    if paragraph.find(".//" + wt("pict")) is not None:
+        return False
+    return True
+
+
+def _paragraph_has_explicit_page_break(paragraph: ET.Element) -> bool:
+    """True when the paragraph carries an explicit w:br[@w:type='page'] run."""
+    return any(
+        node.get(wt("type"), "") == "page"
+        for node in paragraph.iter(wt("br"))
+    )
+
+
+def _paragraph_style_is_heading(style: str) -> bool:
+    return style.startswith("Heading") or style in {"Heading1", "Heading2", "Heading3"}
+
+
+def check_page_spacing(docx_bytes: bytes) -> list[dict]:
+    """
+    Scan every body paragraph and return a list of spacing issues.
+
+    Checks performed
+    ----------------
+    extra_blank      – consecutive empty paragraphs (more than one in a row)
+    multi_break      – more than one explicit page-break paragraph in sequence
+    blank_page       – an explicit page-break immediately followed by another
+                       (producing a visually blank page in the rendered output)
+    orphan_heading   – a heading paragraph whose *next* non-empty body paragraph
+                       is on a different logical block (i.e. a page-break
+                       paragraph separates them with no body content in between)
+    split_paragraph  – a non-empty paragraph immediately followed by a
+                       page-break paragraph, which will force it onto a new page
+                       mid-thought (heuristic: paragraph does not end in . ? !)
+    """
+    try:
+        source = zipfile.ZipFile(BytesIO(docx_bytes), "r")
+    except zipfile.BadZipFile as exc:
+        raise SimpleEditingError("The formatted DOCX could not be read.") from exc
+
+    try:
+        document_root = ET.fromstring(source.read("word/document.xml"))
+        body = document_root.find(wt("body"))
+        if body is None:
+            raise SimpleEditingError("The document body could not be found.")
+
+        paragraphs = [child for child in list(body) if child.tag == wt("p")]
+        issues: list[SpacingIssue] = []
+
+        # Build parallel arrays for fast lookups
+        texts = [_paragraph_text(p) for p in paragraphs]
+        styles = [_paragraph_style(p) for p in paragraphs]
+        is_empty = [_paragraph_is_empty(p) for p in paragraphs]
+        has_break = [_paragraph_has_explicit_page_break(p) for p in paragraphs]
+        ppr_page_break = [
+            (p.find(wt("pPr")) is not None and p.find(wt("pPr")).find(wt("pageBreakBefore")) is not None)  # type: ignore[union-attr]
+            for p in paragraphs
+        ]
+
+        # ── extra_blank: more than one consecutive blank paragraph ─────────
+        blank_run = 0
+        for i, empty in enumerate(is_empty):
+            if empty and not has_break[i]:
+                blank_run += 1
+                if blank_run > 1:
+                    issues.append(SpacingIssue(
+                        kind="extra_blank",
+                        paragraph_index=i,
+                        description=(
+                            f"Extra empty paragraph at position {i} "
+                            f"({blank_run} blanks in a row)."
+                        ),
+                    ))
+            else:
+                blank_run = 0
+
+        # ── multi_break / blank_page: consecutive explicit page-break paras ─
+        break_run = 0
+        for i, brk in enumerate(has_break):
+            if brk:
+                break_run += 1
+                if break_run == 2:
+                    issues.append(SpacingIssue(
+                        kind="blank_page",
+                        paragraph_index=i,
+                        description=(
+                            f"Two consecutive page-break paragraphs at positions "
+                            f"{i-1}–{i} will produce a blank page."
+                        ),
+                    ))
+                elif break_run > 2:
+                    issues.append(SpacingIssue(
+                        kind="multi_break",
+                        paragraph_index=i,
+                        description=(
+                            f"Multiple page-break paragraphs in sequence "
+                            f"(position {i})."
+                        ),
+                    ))
+            else:
+                break_run = 0
+
+        # ── orphan_heading: heading with nothing before the next page break ─
+        for i, style in enumerate(styles):
+            if not _paragraph_style_is_heading(style):
+                continue
+            # Look at the next few paragraphs
+            found_content = False
+            for j in range(i + 1, min(i + 6, len(paragraphs))):
+                if has_break[j] or ppr_page_break[j]:
+                    if not found_content:
+                        issues.append(SpacingIssue(
+                            kind="orphan_heading",
+                            paragraph_index=i,
+                            description=(
+                                f"Heading at position {i} ({texts[i][:60]!r}) "
+                                f"is separated from its content by a page break."
+                            ),
+                        ))
+                    break
+                if not is_empty[j]:
+                    found_content = True
+                    break
+
+        # ── split_paragraph: non-terminal sentence immediately before a break ─
+        for i in range(len(paragraphs) - 1):
+            text = texts[i].strip()
+            if not text or is_empty[i]:
+                continue
+            if not (has_break[i + 1] or ppr_page_break[i + 1]):
+                continue
+            # Heuristic: if the paragraph does not end in sentence-terminating
+            # punctuation, it likely continues and the break will split it.
+            if text[-1] not in {".", "?", "!", ":", "\u2019", "\u201d", ")"}:
+                issues.append(SpacingIssue(
+                    kind="split_paragraph",
+                    paragraph_index=i,
+                    description=(
+                        f"Paragraph at position {i} ({text[:60]!r}) "
+                        f"may be cut off by the following page break."
+                    ),
+                ))
+
+        return [issue.to_dict() for issue in issues]
+
+    except ET.ParseError as exc:
+        raise SimpleEditingError("The document spacing check failed.") from exc
+    finally:
+        source.close()
+
+
+def clean_page_spacing(
+    docx_bytes: bytes,
+    *,
+    remove_extra_blanks: bool = True,
+    remove_multi_breaks: bool = True,
+    fix_orphan_headings: bool = True,
+) -> tuple[bytes, int]:
+    """
+    Apply automatic fixes for spacing issues.
+
+    Returns the updated DOCX bytes and the number of paragraphs changed.
+
+    Fixes applied when the corresponding flag is True
+    --------------------------------------------------
+    remove_extra_blanks   – keep at most one consecutive empty paragraph
+    remove_multi_breaks   – keep at most one consecutive explicit page-break
+                            paragraph (removes excess ones)
+    fix_orphan_headings   – set keepNext on headings that are separated from
+                            their first content paragraph by blank lines
+    """
+    try:
+        source = zipfile.ZipFile(BytesIO(docx_bytes), "r")
+    except zipfile.BadZipFile as exc:
+        raise SimpleEditingError("The formatted DOCX could not be read.") from exc
+
+    try:
+        document_root = ET.fromstring(source.read("word/document.xml"))
+        body = document_root.find(wt("body"))
+        if body is None:
+            raise SimpleEditingError("The document body could not be found.")
+
+        paragraphs = [child for child in list(body) if child.tag == wt("p")]
+        to_remove: list[ET.Element] = []
+        changed = 0
+
+        # Parallel arrays
+        is_empty = [_paragraph_is_empty(p) for p in paragraphs]
+        has_break = [_paragraph_has_explicit_page_break(p) for p in paragraphs]
+        styles = [_paragraph_style(p) for p in paragraphs]
+
+        # ── remove_extra_blanks ─────────────────────────────────────────────
+        if remove_extra_blanks:
+            blank_run = 0
+            for i, empty in enumerate(is_empty):
+                if empty and not has_break[i]:
+                    blank_run += 1
+                    if blank_run > 1:
+                        to_remove.append(paragraphs[i])
+                        changed += 1
+                else:
+                    blank_run = 0
+
+        # ── remove_multi_breaks ─────────────────────────────────────────────
+        if remove_multi_breaks:
+            break_run = 0
+            for i, brk in enumerate(has_break):
+                if brk:
+                    break_run += 1
+                    if break_run > 1:
+                        to_remove.append(paragraphs[i])
+                        changed += 1
+                else:
+                    break_run = 0
+
+        for elem in to_remove:
+            body.remove(elem)
+
+        # ── fix_orphan_headings: add keepNext to isolated headings ──────────
+        if fix_orphan_headings:
+            # Refresh paragraph list after removals
+            paragraphs2 = [child for child in list(body) if child.tag == wt("p")]
+            is_empty2 = [_paragraph_is_empty(p) for p in paragraphs2]
+            has_break2 = [_paragraph_has_explicit_page_break(p) for p in paragraphs2]
+            styles2 = [_paragraph_style(p) for p in paragraphs2]
+
+            for i, style in enumerate(styles2):
+                if not _paragraph_style_is_heading(style):
+                    continue
+                found_content = False
+                for j in range(i + 1, min(i + 6, len(paragraphs2))):
+                    if has_break2[j]:
+                        break
+                    if not is_empty2[j]:
+                        found_content = True
+                        break
+                if not found_content:
+                    # Apply keepNext so the heading stays with following content
+                    p_pr = _ensure_p_pr(paragraphs2[i])
+                    if p_pr.find(wt("keepNext")) is None:
+                        keep = ET.Element(wt("keepNext"))
+                        keep.set(wt("val"), "1")
+                        p_pr.insert(0, keep)
+                        changed += 1
+
+        updated_xml = ET.tostring(
+            document_root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            short_empty_elements=True,
+        )
+        return _write_docx_parts(source, {"word/document.xml": updated_xml}), changed
+
+    except ET.ParseError as exc:
+        raise SimpleEditingError("The document spacing clean failed.") from exc
+    finally:
+        source.close()
