@@ -1489,3 +1489,143 @@ a {
     flex-direction: column;
   }
 }
+
+/* -------------------------------------------------------
+   MANUAL FOOTER EDITING / POSITION PREVIEW
+------------------------------------------------------- */
+
+.footer-manual-preview {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+  padding: 12px;
+  border: 1px solid var(--border, #d9dde3);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.footer-manual-preview-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.footer-manual-preview-heading strong {
+  font-size: 0.92rem;
+}
+
+.footer-manual-preview-heading span,
+.footer-manual-toggle-row span,
+.footer-manual-field small {
+  color: var(--muted, #626b77);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.footer-preview-paper {
+  overflow: hidden;
+  padding: 20px 18px 15px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 9px;
+  background: #fff;
+  color: #252525;
+}
+
+.footer-preview-rule {
+  height: 3px;
+  margin-bottom: 9px;
+  background: #1a99a0;
+}
+
+.footer-preview-row {
+  display: grid;
+  grid-template-columns: 25% 50% 25%;
+  align-items: center;
+  min-width: 0;
+  font-family: Garamond, "Times New Roman", serif;
+  font-size: 11px;
+}
+
+.footer-preview-item {
+  min-width: 0;
+  white-space: nowrap;
+  transition: transform 120ms ease;
+}
+
+.footer-preview-left {
+  text-align: left;
+}
+
+.footer-preview-centre {
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+
+.footer-preview-right {
+  text-align: right;
+}
+
+.footer-manual-toggle-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-top: 12px;
+}
+
+.footer-manual-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.footer-manual-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border, #d9dde3);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.footer-manual-field > span {
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.footer-manual-input-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+}
+
+.footer-manual-input-row input[type="number"] {
+  width: 64px;
+  min-height: 38px;
+  padding: 7px 8px;
+  border: 1px solid var(--border, #cbd2da);
+  border-radius: 8px;
+  background: rgba(5, 17, 31, 0.55);
+  color: inherit;
+  font: inherit;
+  text-align: center;
+}
+
+.footer-position-range {
+  width: 100%;
+  accent-color: var(--accent, #1a99a0);
+}
+
+@media (max-width: 900px) {
+  .footer-manual-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .footer-preview-row {
+    grid-template-columns: 23% 48% 29%;
+    font-size: 9px;
+  }
+}

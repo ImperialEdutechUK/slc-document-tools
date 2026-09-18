@@ -315,6 +315,7 @@ function FormatterPanel() {
   const [textEditorOpen, setTextEditorOpen] = useState(false);
   const [textDraft, setTextDraft] = useState("");
   const [footerEditorOpen, setFooterEditorOpen] = useState(false);
+  const [manualFooterControlsOpen, setManualFooterControlsOpen] = useState(false);
   const [footerBusy, setFooterBusy] = useState(false);
   const [footerSettings, setFooterSettings] = useState<FooterSettings>({
     course_text: "",
@@ -347,6 +348,7 @@ function FormatterPanel() {
     setTextEditorOpen(false);
     setTextDraft("");
     setFooterEditorOpen(false);
+    setManualFooterControlsOpen(false);
     setFooterSettings({
       course_text: "",
       copyright_text: "© South London College Ltd",
@@ -614,6 +616,7 @@ function FormatterPanel() {
 
     if (footerEditorOpen) {
       setFooterEditorOpen(false);
+      setManualFooterControlsOpen(false);
       return;
     }
 
@@ -637,6 +640,7 @@ function FormatterPanel() {
         copyright_offset: result.copyright_offset ?? 0,
       });
       setFooterEditorOpen(true);
+      setManualFooterControlsOpen(false);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "The footer could not be loaded."
@@ -663,6 +667,25 @@ function FormatterPanel() {
       course_offset: 0,
       copyright_offset: 0,
     }));
+  }
+
+  function setFooterOffsetManual(
+    field: "page_offset" | "course_offset" | "copyright_offset",
+    rawValue: string
+  ) {
+    const parsed = Number.parseInt(rawValue, 10);
+    const safeValue = Number.isFinite(parsed)
+      ? Math.max(-6, Math.min(6, parsed))
+      : 0;
+
+    setFooterSettings((current) => ({
+      ...current,
+      [field]: safeValue,
+    }));
+  }
+
+  function footerPreviewShift(value: number) {
+    return { transform: `translateX(${value * 4}px)` };
   }
 
   function footerOffsetLabel(value: number) {
@@ -1213,7 +1236,7 @@ function FormatterPanel() {
                             ? "Loading footer…"
                             : footerEditorOpen
                             ? "Close footer editor"
-                            : "Edit footer"}
+                            : "Edit footer manually"}
                         </button>
 
                         <button
@@ -1273,10 +1296,10 @@ function FormatterPanel() {
                       <div className="editor-subpanel">
                         <div className="editor-subpanel-heading">
                           <div>
-                            <h5>Edit footer</h5>
+                            <h5>Edit footer manually</h5>
                             <p>
-                              Update footer text and make small left/right
-                              position adjustments without changing the SLC style.
+                              Edit the footer text directly and fine-tune each item
+                              without changing the SLC footer style.
                             </p>
                           </div>
 
@@ -1319,6 +1342,42 @@ function FormatterPanel() {
                               Fixed format. Page numbers update automatically: 1 | Page, 2 | Page, 3 | Page…
                             </span>
                           </label>
+                        </div>
+
+                        <div className="footer-manual-preview" aria-label="Footer position preview">
+                          <div className="footer-manual-preview-heading">
+                            <div>
+                              <strong>Footer preview</strong>
+                              <span>
+                                Approximate on-screen guide. Save the footer to refresh the real DOCX/PDF preview.
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="footer-preview-paper">
+                            <div className="footer-preview-rule" />
+                            <div className="footer-preview-row">
+                              <span
+                                className="footer-preview-item footer-preview-left"
+                                style={footerPreviewShift(footerSettings.page_offset)}
+                              >
+                                1 | Page
+                              </span>
+                              <span
+                                className="footer-preview-item footer-preview-centre"
+                                style={footerPreviewShift(footerSettings.course_offset)}
+                                title={footerSettings.course_text}
+                              >
+                                {footerSettings.course_text || "Course name"}
+                              </span>
+                              <span
+                                className="footer-preview-item footer-preview-right"
+                                style={footerPreviewShift(footerSettings.copyright_offset)}
+                              >
+                                {footerSettings.copyright_text || "© South London College Ltd"}
+                              </span>
+                            </div>
+                          </div>
                         </div>
 
                         <div className="footer-position-section">
@@ -1386,6 +1445,69 @@ function FormatterPanel() {
                             Each click adds or removes a small amount of horizontal space. Save the footer
                             to refresh the preview, or use Reset positions to restore the original alignment.
                           </p>
+
+                          <div className="footer-manual-toggle-row">
+                            <button
+                              type="button"
+                              className="button secondary small"
+                              disabled={editApplyBusy}
+                              onClick={() =>
+                                setManualFooterControlsOpen((current) => !current)
+                              }
+                            >
+                              {manualFooterControlsOpen
+                                ? "Hide exact position controls"
+                                : "Enter positions manually"}
+                            </button>
+                            <span>
+                              Use exact values when the left/right buttons are not precise enough.
+                            </span>
+                          </div>
+
+                          {manualFooterControlsOpen && (
+                            <div className="footer-manual-grid">
+                              {[
+                                ["Page number", "page_offset"],
+                                ["Course name", "course_offset"],
+                                ["Copyright", "copyright_offset"],
+                              ].map(([label, field]) => {
+                                const offsetField = field as
+                                  | "page_offset"
+                                  | "course_offset"
+                                  | "copyright_offset";
+                                return (
+                                  <label className="footer-manual-field" key={offsetField}>
+                                    <span>{label} position</span>
+                                    <div className="footer-manual-input-row">
+                                      <input
+                                        type="number"
+                                        min={-6}
+                                        max={6}
+                                        step={1}
+                                        value={footerSettings[offsetField]}
+                                        onChange={(event) =>
+                                          setFooterOffsetManual(offsetField, event.target.value)
+                                        }
+                                      />
+                                      <input
+                                        className="footer-position-range"
+                                        type="range"
+                                        min={-6}
+                                        max={6}
+                                        step={1}
+                                        value={footerSettings[offsetField]}
+                                        onChange={(event) =>
+                                          setFooterOffsetManual(offsetField, event.target.value)
+                                        }
+                                        aria-label={`${label} exact position`}
+                                      />
+                                    </div>
+                                    <small>−6 = further left, 0 = default, +6 = further right</small>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
 
                         <div className="editor-subpanel-actions">
@@ -1395,7 +1517,7 @@ function FormatterPanel() {
                             disabled={editApplyBusy}
                             onClick={saveFooterEdit}
                           >
-                            {editApplyBusy ? "Saving…" : "Save footer"}
+                            {editApplyBusy ? "Saving…" : "Save footer & refresh preview"}
                           </button>
 
                           <button
