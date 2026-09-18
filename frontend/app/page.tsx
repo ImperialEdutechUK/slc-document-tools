@@ -543,6 +543,7 @@ function FormatterPanel() {
       | "heading1"
       | "bullets"
       | "numbering"
+      | "references_bullets"
       | "normal"
       | "page_break_before"
       | "remove_page_break_before"
