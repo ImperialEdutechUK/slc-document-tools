@@ -719,6 +719,84 @@ async def pdf_remove_pages(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/history")
+def job_history(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """Walk the job chain backwards from job_id and return a history list.
+
+    Each entry contains the job id, type, a human-readable label, the
+    completed_at timestamp, and the download URL so the frontend can let the
+    user revert to any earlier state in one click.
+    """
+    _LABELS: dict[str, str] = {
+        "format":               "Initial format",
+        "format_batch":         "Batch format",
+        "simple_edit":          "Formatting edit",
+        "text_edit":            "Text edit",
+        "footer_edit":          "Footer edit",
+        "toc_update":           "TOC update",
+        "clean_spacing":        "Spacing clean",
+        "formatted_word_to_pdf": "PDF conversion",
+        "references_bullets":   "References → Bullets",
+    }
+
+    history: list[dict] = []
+    current_id: str | None = job_id
+    seen: set[str] = set()
+
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        job = db.get(Job, current_id)
+        if not job or job.status != "completed":
+            break
+
+        try:
+            details = json.loads(job.meta_json) if job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+
+        # Derive a richer label for simple_edit by including the action name.
+        label = _LABELS.get(job.job_type, job.job_type)
+        if job.job_type == "simple_edit":
+            action = details.get("simple_edit", {}).get("action", "")
+            action_labels: dict[str, str] = {
+                "heading1":              "→ Heading 1",
+                "bullets":               "→ Bullets",
+                "numbering":             "→ Numbering",
+                "references_bullets":    "→ Reference Bullets",
+                "normal":                "→ Normal text",
+                "page_break_before":     "→ New page",
+                "remove_page_break_before": "→ Normal flow",
+                "keep_together":         "→ Keep together",
+                "allow_split":           "→ Allow split",
+                "blank_line_before":     "+ Blank line above",
+                "blank_line_after":      "+ Blank line below",
+            }
+            if action in action_labels:
+                label = f"Edit {action_labels[action]}"
+
+        history.append({
+            "job_id":     job.id,
+            "job_type":   job.job_type,
+            "label":      label,
+            "filename":   job.output_filename,
+            "download_url": f"{API_PREFIX}/jobs/{job.id}/download" if job.output_key else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "is_current": job.id == job_id,
+        })
+
+        # Walk to the source job that produced this one.
+        source_id: str | None = None
+        for key in ("simple_edit", "text_edit", "footer_edit", "toc_update", "clean_spacing"):
+            source_id = details.get(key, {}).get("source_job_id")
+            if source_id:
+                break
+        if not source_id:
+            source_id = details.get("source_format_job_id")
+        current_id = source_id
+
+    return {"job_id": job_id, "history": history}
+
+
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}/spacing-issues")
 def spacing_issues(job_id: str, db: Session = Depends(get_db)) -> dict:
     """Return a list of detected page-spacing issues for a formatted DOCX job."""

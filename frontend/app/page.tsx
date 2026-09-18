@@ -33,6 +33,16 @@ type EditableParagraph = {
   keep_together: boolean;
 };
 
+type HistoryEntry = {
+  job_id: string;
+  job_type: string;
+  label: string;
+  filename: string | null;
+  download_url: string | null;
+  completed_at: string | null;
+  is_current: boolean;
+};
+
 type SpacingIssue = {
   kind: "extra_blank" | "multi_break" | "blank_page" | "orphan_heading" | "split_paragraph";
   paragraph_index: number;
@@ -342,6 +352,10 @@ function FormatterPanel() {
     fix_orphan_headings: true,
   });
 
+    const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
+
     const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
 
   useEffect(() => {
@@ -366,6 +380,8 @@ function FormatterPanel() {
     setSpacingEditorOpen(false);
     setSpacingIssues([]);
     setSpacingChecked(false);
+    setHistory([]);
+    setHistoryOpen(false);
     setFooterSettings({
       course_text: "",
       copyright_text: "© South London College Ltd",
@@ -508,7 +524,10 @@ function FormatterPanel() {
 
     setEditorOpen(true);
     setEditMessage("");
-    await loadEditableParagraphs(job.id);
+    await Promise.all([
+      loadEditableParagraphs(job.id),
+      history.length === 0 ? loadHistory(job.id) : Promise.resolve(),
+    ]);
   }
 
   function toggleParagraphSelection(index: number) {
@@ -559,7 +578,7 @@ function FormatterPanel() {
       setEditMessage(
         `${result.details?.simple_edit?.paragraphs_changed ?? selectedParagraphs.length} paragraph(s) updated.`
       );
-      await loadEditableParagraphs(result.id);
+      await Promise.all([loadHistory(result.id), loadEditableParagraphs(result.id)]);
       await generatePreview(result.id);
     } catch (err) {
       setError(
@@ -628,7 +647,39 @@ function FormatterPanel() {
     }
   }
 
-  async function checkPageSpacing() {
+  async function loadHistory(jobId: string) {
+    setHistoryBusy(true);
+    try {
+      const data = await apiRequest(`/api/v1/jobs/${jobId}/history`, { method: "GET" });
+      setHistory(data.history || []);
+    } catch {
+      // History is non-critical — silently ignore
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  async function revertToJob(entry: HistoryEntry) {
+    if (entry.is_current) return;
+    const reverted: JobResponse = {
+      id: entry.job_id,
+      job_type: entry.job_type,
+      status: "completed",
+      output_filename: entry.filename,
+      download_url: entry.download_url,
+    };
+    setJob(reverted);
+    setHistoryOpen(false);
+    setPdfJob(null);
+    setEditMessage("Reverted to: " + entry.label);
+    setSpacingChecked(false);
+    setSpacingIssues([]);
+    await loadHistory(entry.job_id);
+    await loadEditableParagraphs(entry.job_id);
+    await generatePreview(entry.job_id);
+  }
+
+    async function checkPageSpacing() {
     if (!job) return;
     setSpacingBusy(true);
     setSpacingIssues([]);
@@ -657,6 +708,7 @@ function FormatterPanel() {
       setSpacingChecked(false);
       setSpacingIssues([]);
       setSpacingEditorOpen(false);
+      await loadHistory(result.id);
       await previewFormattedDocument();
     } catch (err) {
       setEditMessage(err instanceof Error ? err.message : "Spacing clean failed.");
@@ -1124,6 +1176,19 @@ function FormatterPanel() {
                   </button>
 
                   <button
+                    className={`button secondary history-btn ${historyOpen ? "active" : ""}`}
+                    type="button"
+                    disabled={pdfBusy || previewBusy || editApplyBusy}
+                    onClick={() => {
+                      if (!historyOpen && history.length === 0 && job) loadHistory(job.id);
+                      setHistoryOpen((v) => !v);
+                    }}
+                    title="View edit history and revert"
+                  >
+                    {historyBusy ? "Loading…" : `History${history.length > 0 ? ` (${history.length})` : ""}`}
+                  </button>
+
+                  <button
                     className="button primary"
                     type="button"
                     disabled={pdfBusy || previewBusy || editApplyBusy}
@@ -1132,6 +1197,79 @@ function FormatterPanel() {
                     {pdfBusy ? "Converting to PDF…" : "Convert to PDF"}
                   </button>
                 </div>
+
+                {historyOpen && (
+                  <div className="history-panel">
+                    <div className="history-panel-header">
+                      <div>
+                        <h5>Edit History</h5>
+                        <p>Click any entry to revert the document to that state. Reverts are non-destructive — you can always come back.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="history-close"
+                        onClick={() => setHistoryOpen(false)}
+                        aria-label="Close history"
+                      >✕</button>
+                    </div>
+
+                    {history.length === 0 && !historyBusy && (
+                      <div className="history-empty">No edit history yet. Make an edit to see it here.</div>
+                    )}
+
+                    {historyBusy && (
+                      <div className="history-empty">Loading history…</div>
+                    )}
+
+                    <ol className="history-list">
+                      {history.map((entry, idx) => (
+                        <li
+                          key={entry.job_id}
+                          className={`history-entry ${entry.is_current ? "current" : ""}`}
+                        >
+                          <div className="history-entry-meta">
+                            <span className="history-label">
+                              {idx === history.length - 1 ? "🏁 " : entry.is_current ? "● " : "○ "}
+                              {entry.label}
+                            </span>
+                            {entry.completed_at && (
+                              <time className="history-time" dateTime={entry.completed_at}>
+                                {new Date(entry.completed_at).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </time>
+                            )}
+                          </div>
+
+                          <div className="history-entry-actions">
+                            {entry.is_current ? (
+                              <span className="history-current-badge">Current</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="button secondary small"
+                                onClick={() => revertToJob(entry)}
+                                disabled={editApplyBusy || previewBusy}
+                              >
+                                Revert to this
+                              </button>
+                            )}
+                            {entry.download_url && (
+                              <a
+                                className="button secondary small"
+                                href={apiUrl(entry.download_url)}
+                                title={`Download ${entry.filename ?? "file"}`}
+                              >
+                                ↓
+                              </a>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
 
                 {editorOpen && (
                   <section className="simple-editor">
@@ -1279,6 +1417,20 @@ function FormatterPanel() {
                           onClick={updateTableOfContents}
                         >
                           Update TOC
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy}
+                          title={
+                            selectedParagraphs.length > 0
+                              ? "Convert selected paragraphs to reference bullets"
+                              : "Auto-detect references section and convert to bullets"
+                          }
+                          onClick={() => applySimpleEdit("references_bullets")}
+                        >
+                          References → Bullets
                         </button>
 
                         <button

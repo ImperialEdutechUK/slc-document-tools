@@ -408,6 +408,23 @@ def add_bullets_to_references(out_body):
         "resources for further reference",
         "resources for further references",
         "resources and further reading",
+        # Additional common variants
+        "reading list",
+        "recommended reading",
+        "recommended resources",
+        "sources",
+        "works cited",
+        "citations",
+        "additional reading",
+        "additional resources",
+        "suggested reading",
+        "suggested resources",
+        "useful resources",
+        "useful links",
+        "web resources",
+        "online resources",
+        "course resources",
+        "learning resources",
     }
 
     def normalise_heading(text):

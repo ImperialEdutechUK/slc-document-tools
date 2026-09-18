@@ -17,6 +17,35 @@ ORNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PRNS = "http://schemas.openxmlformats.org/package/2006/relationships"
 XMLNS = "http://www.w3.org/XML/1998/namespace"
 
+# Heading text variants that introduce a references/resources list.
+# Kept in sync with the same set in engine.py so both the initial format
+# pass and the post-edit "references_bullets" action recognise the same headings.
+REFERENCE_HEADINGS: frozenset[str] = frozenset({
+    "references",
+    "reference list",
+    "bibliography",
+    "further reading",
+    "resources for further reference",
+    "resources for further references",
+    "resources and further reading",
+    "reading list",
+    "recommended reading",
+    "recommended resources",
+    "sources",
+    "works cited",
+    "citations",
+    "additional reading",
+    "additional resources",
+    "suggested reading",
+    "suggested resources",
+    "useful resources",
+    "useful links",
+    "web resources",
+    "online resources",
+    "course resources",
+    "learning resources",
+})
+
 
 def wt(tag: str) -> str:
     return "{" + WNS + "}" + tag
@@ -247,6 +276,121 @@ def _is_user_editable(paragraph: ET.Element) -> bool:
     return True
 
 
+def _normalise_ref_heading(text: str) -> str:
+    """Normalise a paragraph's text for comparison against REFERENCE_HEADINGS."""
+    import re as _re
+    value = _re.sub(r"\s+", " ", (text or "").strip().lower())
+    return value.rstrip(" :;-")
+
+
+def _strip_manual_number_prefix(paragraph: ET.Element) -> None:
+    """Remove a literal leading '1. ' or '2) ' from the first text node."""
+    import re as _re
+    text_nodes = list(paragraph.iter(wt("t")))
+    for index, node in enumerate(text_nodes):
+        original = node.text or ""
+        if not original.strip():
+            continue
+        match = _re.match(r"^(\s*)\d{1,3}[.)]\s+(.*)$", original)
+        if match:
+            node.text = match.group(1) + match.group(2)
+            return
+        if _re.match(r"^\s*\d{1,3}[.)]\s*$", original):
+            node.text = ""
+            if index + 1 < len(text_nodes) and text_nodes[index + 1].text:
+                text_nodes[index + 1].text = text_nodes[index + 1].text.lstrip()
+            return
+        return
+
+
+def _apply_references_bullets(
+    body: ET.Element,
+    numbering_root: ET.Element,
+    target_indices: set[int] | None = None,
+) -> int:
+    """Convert reference-section paragraphs to bullet list items.
+
+    When *target_indices* is provided (a set of paragraph indices), only
+    those paragraphs are converted.  When it is ``None``, every paragraph
+    that follows a recognised references heading (up to the next heading) is
+    converted automatically — this replicates the engine's initial pass so
+    the action can be re-run from the editor after manual changes.
+
+    Returns the number of paragraphs changed.
+    """
+    bullet_num_id = _ensure_numbering_format(numbering_root, "bullet")
+
+    paragraphs = [child for child in list(body) if child.tag == wt("p")]
+    changed = 0
+
+    if target_indices is not None:
+        # Explicit selection: convert every selected paragraph to a bullet.
+        for i, para in enumerate(paragraphs):
+            if i not in target_indices:
+                continue
+            _strip_manual_number_prefix(para)
+            p_pr = _ensure_p_pr(para)
+            p_style = p_pr.find(wt("pStyle"))
+            if p_style is None:
+                p_style = ET.Element(wt("pStyle"))
+                p_pr.insert(0, p_style)
+            p_style.set(wt("val"), "ListParagraph")
+            old = p_pr.find(wt("numPr"))
+            if old is not None:
+                p_pr.remove(old)
+            num_pr = ET.Element(wt("numPr"))
+            ET.SubElement(num_pr, wt("ilvl")).set(wt("val"), "0")
+            ET.SubElement(num_pr, wt("numId")).set(wt("val"), bullet_num_id)
+            insert_at = 0
+            pagination = {wt("pStyle"), wt("keepNext"), wt("keepLines"), wt("pageBreakBefore"), wt("widowControl")}
+            for idx, child in enumerate(list(p_pr)):
+                if child.tag in pagination:
+                    insert_at = idx + 1
+            p_pr.insert(insert_at, num_pr)
+            changed += 1
+    else:
+        # Auto mode: scan for reference headings and convert their sections.
+        in_refs = False
+        for para in paragraphs:
+            txt = _paragraph_text(para)
+            style = _paragraph_style(para)
+
+            if _normalise_ref_heading(txt) in REFERENCE_HEADINGS:
+                in_refs = True
+                continue
+
+            if style.startswith("Heading") or style in {"TOC-Heading", "TOCHeading"}:
+                if in_refs:
+                    break
+                continue
+
+            if not in_refs or not txt:
+                continue
+
+            _strip_manual_number_prefix(para)
+            p_pr = _ensure_p_pr(para)
+            p_style = p_pr.find(wt("pStyle"))
+            if p_style is None:
+                p_style = ET.Element(wt("pStyle"))
+                p_pr.insert(0, p_style)
+            p_style.set(wt("val"), "ListParagraph")
+            old = p_pr.find(wt("numPr"))
+            if old is not None:
+                p_pr.remove(old)
+            num_pr = ET.Element(wt("numPr"))
+            ET.SubElement(num_pr, wt("ilvl")).set(wt("val"), "0")
+            ET.SubElement(num_pr, wt("numId")).set(wt("val"), bullet_num_id)
+            insert_at = 0
+            pagination = {wt("pStyle"), wt("keepNext"), wt("keepLines"), wt("pageBreakBefore"), wt("widowControl")}
+            for idx, child in enumerate(list(p_pr)):
+                if child.tag in pagination:
+                    insert_at = idx + 1
+            p_pr.insert(insert_at, num_pr)
+            changed += 1
+
+    return changed
+
+
 def _write_docx_parts(source: zipfile.ZipFile, replacements: dict[str, bytes]) -> bytes:
     output = BytesIO()
     with zipfile.ZipFile(output, "w") as target:
@@ -322,6 +466,7 @@ def apply_simple_edits(
         "heading1",
         "bullets",
         "numbering",
+        "references_bullets",
         "normal",
         "page_break_before",
         "remove_page_break_before",
@@ -349,24 +494,42 @@ def apply_simple_edits(
             raise SimpleEditingError("The document body could not be found.")
 
         numbering_root = None
-        if action in {"bullets", "numbering"}:
+        if action in {"bullets", "numbering", "references_bullets"}:
             if "word/numbering.xml" not in source.namelist():
                 raise SimpleEditingError(
                     "This document does not contain list numbering definitions."
                 )
             numbering_root = ET.fromstring(source.read("word/numbering.xml"))
-            desired_format = "bullet" if action == "bullets" else "decimal"
-            num_id = _ensure_numbering_format(numbering_root, desired_format)
+            if action in {"bullets", "numbering"}:
+                desired_format = "bullet" if action == "bullets" else "decimal"
+                num_id = _ensure_numbering_format(numbering_root, desired_format)
+            else:
+                num_id = ""
         else:
             num_id = ""
 
-        changed = 0
+        # references_bullets: if specific paragraphs are selected, convert only
+        # those; otherwise auto-scan the body for every reference section.
+        if action == "references_bullets":
+            target_indices: set[int] | None = requested if requested else None
+            changed = _apply_references_bullets(body, numbering_root, target_indices)
+            if not changed:
+                raise SimpleEditingError(
+                    "No reference paragraphs were found to convert. "
+                    "Select individual paragraphs or ensure the section starts with a "
+                    "recognised heading (References, Bibliography, Reading List, etc.)."
+                )
+        else:
+            changed = 0
+
         paragraph_index = -1
         original_children = list(body)
         for child in original_children:
             if child.tag != wt("p"):
                 continue
             paragraph_index += 1
+            if action == "references_bullets":
+                break  # already handled above
             if paragraph_index not in requested or not _is_user_editable(child):
                 continue
 
@@ -394,7 +557,7 @@ def apply_simple_edits(
                 )
             changed += 1
 
-        if not changed:
+        if not changed and action != "references_bullets":
             raise SimpleEditingError("None of the selected paragraphs could be edited.")
 
         replacements = {
