@@ -1093,6 +1093,20 @@ def _normalise_footer_table_layout(root: ET.Element) -> None:
                 if display_course_text != current_course_text:
                     _replace_visible_text(cell, display_course_text)
                 _set_footer_course_font(cell, display_course_text)
+                # Reset inherited indents before applying the requested manual
+                # offset; otherwise a centred title can drift left or right.
+                paragraph = _footer_cell_paragraph(cell)
+                p_pr = _ensure_xml_child(paragraph, "pPr", first=True)
+                _ensure_xml_child(p_pr, "jc").set(wt("val"), "center")
+                ind = _ensure_xml_child(p_pr, "ind")
+                ind.attrib.clear()
+                for attr in ("left", "right", "firstLine", "hanging"):
+                    ind.set(wt(attr), "0")
+                tc_mar = _ensure_xml_child(cell.find(wt("tcPr")), "tcMar")
+                for side in ("left", "right"):
+                    margin = _ensure_xml_child(tc_mar, side)
+                    margin.set(wt("w"), "120")
+                    margin.set(wt("type"), "dxa")
             widths.append(width)
 
         tbl_pr = table.find(wt("tblPr"))
@@ -1102,6 +1116,10 @@ def _normalise_footer_table_layout(root: ET.Element) -> None:
         tbl_w = _ensure_xml_child(tbl_pr, "tblW", first=True)
         tbl_w.set(wt("w"), str(_FOOTER_CONTENT_WIDTH_TWIPS))
         tbl_w.set(wt("type"), "dxa")
+        _ensure_xml_child(tbl_pr, "jc").set(wt("val"), "center")
+        table_indent = _ensure_xml_child(tbl_pr, "tblInd")
+        table_indent.set(wt("w"), "0")
+        table_indent.set(wt("type"), "dxa")
         layout = _ensure_xml_child(tbl_pr, "tblLayout")
         layout.set(wt("type"), "fixed")
 

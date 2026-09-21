@@ -648,13 +648,18 @@ def make_footer_xml(course_name, page_on_right):
             if top_border else ""
         )
         fit_xml = '<w:tcFitText/>' if fit_text else ''
+        # Equal title padding keeps a visible gap to both outer footer items.
+        padding = "120" if fit_text else "0" 
         return (
             '<w:tc><w:tcPr><w:tcW w:w="' + str(width) + '" w:type="dxa"/>'
             + border_xml +
-            '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="0" w:type="dxa"/>'
-            '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar>'
+            '<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="' + padding + '" w:type="dxa"/>'
+            '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="' + padding + '" w:type="dxa"/></w:tcMar>'
             '<w:noWrap/>' + fit_xml + '<w:vAlign w:val="center"/></w:tcPr>'
-            '<w:p><w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="' + align + '"/></w:pPr>'
+            '<w:p><w:pPr><w:pStyle w:val="Footer"/>'
+            '<w:ind w:left="0" w:right="0" w:firstLine="0" w:hanging="0"/>'
+            '<w:spacing w:before="0" w:after="0"/>'
+            '<w:jc w:val="' + align + '"/></w:pPr>'
             + content + '</w:p></w:tc>'
         )
 
@@ -681,6 +686,7 @@ def make_footer_xml(course_name, page_on_right):
         '<w:tbl>'
         '<w:tblPr>'
         '<w:tblW w:w="' + str(FOOTER_CONTENT_WIDTH_TWIPS) + '" w:type="dxa"/>'
+        '<w:jc w:val="center"/><w:tblInd w:w="0" w:type="dxa"/>'
         '<w:tblLayout w:type="fixed"/>'
         '<w:tblBorders>'
         '<w:top w:val="none" w:sz="0" w:space="0"/>'
