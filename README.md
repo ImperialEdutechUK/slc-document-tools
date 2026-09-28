@@ -168,6 +168,18 @@ MAGNIFIC_API_HEADER=x-magnific-api-key
 
 The backend automatically loads `backend/.env` locally. On Railway, set the same variables in the service Variables panel instead. Legacy `FREEPIK_API_KEY` and `FREEPIK_RESOURCE_API_*` names are still accepted so older deployments do not break.
 
+### Optional account fallback
+
+The official stock API remains the preferred Freepik/Magnific download path. If you also have a licensed account, the backend can optionally try an authenticated browser download only after the API path fails. Enable it with Railway service variables (or `backend/.env` locally):
+
+```env
+FREEPIK_ACCOUNT_FALLBACK=true
+FREEPIK_ACCOUNT_EMAIL=your-account-email
+FREEPIK_ACCOUNT_PASSWORD=your-account-password
+```
+
+Do **not** put the real email/password in GitHub, `.env.example`, frontend code, or application logs. The Docker image includes Chromium and the backend uses Playwright only when this fallback is enabled. Website authentication can require verification or UI-selector updates; if Freepik/Magnific changes its login/download controls, the optional `FREEPIK_*_SELECTOR` variables in `backend/.env.example` can be overridden without changing code.
+
 Direct public image URLs work independently of the stock API.
 
 ## API endpoints

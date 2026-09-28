@@ -241,6 +241,27 @@ class LinkedImageTests(unittest.TestCase):
         self.assertEqual([], result.items)
         self.assertEqual("manual_override", result.entries[0].status)
 
+    @patch.dict("os.environ", {"FREEPIK_ACCOUNT_FALLBACK": "true", "FREEPIK_ACCOUNT_EMAIL": "user@example.com", "FREEPIK_ACCOUNT_PASSWORD": "secret"}, clear=True)
+    @patch("app.services.linked_images.download_with_account")
+    def test_account_fallback_is_used_when_api_key_is_missing(self, account_download):
+        account_download.return_value = png_bytes()
+        payload = _download_stock_resource(
+            "https://www.freepik.com/free-photo/example_12345678.htm"
+        )
+        self.assertEqual(png_bytes(), payload)
+        account_download.assert_called_once_with(
+            "https://www.freepik.com/free-photo/example_12345678.htm"
+        )
+
+    @patch.dict("os.environ", {"FREEPIK_ACCOUNT_FALLBACK": "false"}, clear=True)
+    @patch("app.services.linked_images.download_with_account")
+    def test_account_fallback_is_disabled_by_default(self, account_download):
+        with self.assertRaisesRegex(ValueError, "stock image could not be downloaded"):
+            _download_stock_resource(
+                "https://www.freepik.com/free-photo/example_12345678.htm"
+            )
+        account_download.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

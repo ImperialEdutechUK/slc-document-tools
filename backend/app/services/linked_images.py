@@ -18,6 +18,7 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 from ..formatter.image_placement import prepare_image_catalog
+from .freepik_account import account_fallback_configured, download_with_account
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -403,50 +404,62 @@ def _try_stock_resource_id(
 
 
 def _download_stock_resource(url: str) -> bytes:
-    api_key, base, header_name = _api_config()
-    resource_id = _extract_resource_id(url)
-    if resource_id is None:
-        raise ValueError("Could not identify the stock resource ID from this link.")
-
-    headers = {header_name: api_key, "Accept": "application/json"}
-    timeout = httpx.Timeout(20.0, connect=10.0)
     errors: list[str] = []
 
-    with httpx.Client(timeout=timeout, headers=headers) as client:
-        payload, primary_errors = _try_stock_resource_id(client, base, resource_id)
-        errors.extend(primary_errors)
-        if payload is not None:
-            return payload
+    try:
+        api_key, base, header_name = _api_config()
+        resource_id = _extract_resource_id(url)
+        if resource_id is None:
+            raise ValueError("Could not identify the stock resource ID from this link.")
 
-        # Some older Freepik/Magnific page URLs still resolve on the website
-        # even though their historical numeric ID no longer resolves through
-        # /resources/{id}. Search the official catalogue by the page slug and
-        # retry with a high-confidence migrated/current resource match.
+        headers = {header_name: api_key, "Accept": "application/json"}
+        timeout = httpx.Timeout(20.0, connect=10.0)
+
+        with httpx.Client(timeout=timeout, headers=headers) as client:
+            payload, primary_errors = _try_stock_resource_id(client, base, resource_id)
+            errors.extend(primary_errors)
+            if payload is not None:
+                return payload
+
+            # Some older Freepik/Magnific page URLs still resolve on the website
+            # even though their historical numeric ID no longer resolves through
+            # /resources/{id}. Search the official catalogue by the page slug and
+            # retry with a high-confidence migrated/current resource match.
+            try:
+                replacement = _search_replacement_resource(client, base, url, resource_id)
+            except Exception as exc:
+                replacement = None
+                errors.append(f"catalogue search: {exc}")
+
+            if replacement is not None:
+                replacement_id = replacement.get("id")
+                known_formats = _available_raster_formats({"data": replacement})
+                if isinstance(replacement_id, int):
+                    payload, replacement_errors = _try_stock_resource_id(
+                        client,
+                        base,
+                        replacement_id,
+                        known_formats=known_formats,
+                    )
+                    if payload is not None:
+                        return payload
+                    errors.append(f"replacement resource {replacement_id} failed")
+                    errors.extend(replacement_errors)
+            else:
+                errors.append("catalogue search: no high-confidence replacement resource found")
+    except Exception as exc:
+        errors.append(f"stock API: {exc}")
+
+    if account_fallback_configured():
         try:
-            replacement = _search_replacement_resource(client, base, url, resource_id)
+            payload = download_with_account(url)
+            _verify_image(payload)
+            return payload
         except Exception as exc:
-            replacement = None
-            errors.append(f"catalogue search: {exc}")
-
-        if replacement is not None:
-            replacement_id = replacement.get("id")
-            known_formats = _available_raster_formats({"data": replacement})
-            if isinstance(replacement_id, int):
-                payload, replacement_errors = _try_stock_resource_id(
-                    client,
-                    base,
-                    replacement_id,
-                    known_formats=known_formats,
-                )
-                if payload is not None:
-                    return payload
-                errors.append(f"replacement resource {replacement_id} failed")
-                errors.extend(replacement_errors)
-        else:
-            errors.append("catalogue search: no high-confidence replacement resource found")
+            errors.append(f"account fallback: {exc}")
 
     detail = "; ".join(errors[-10:]) if errors else "no downloadable raster URL was returned"
-    raise ValueError(f"The stock API could not return a usable JPG/PNG image ({detail}).")
+    raise ValueError(f"The stock image could not be downloaded ({detail}).")
 
 
 def _verify_image(payload: bytes) -> None:

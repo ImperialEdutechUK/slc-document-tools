@@ -11,6 +11,7 @@ RUN apt-get update \
        fontconfig \
        fonts-liberation \
        fonts-dejavu-core \
+       chromium \
     && rm -rf /var/lib/apt/lists/*
 
 # Exact Garamond only. No EB Garamond or fontconfig Garamond alias is installed.
