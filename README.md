@@ -174,8 +174,17 @@ The official stock API remains the preferred Freepik/Magnific download path. If 
 
 ```env
 FREEPIK_ACCOUNT_FALLBACK=true
-FREEPIK_ACCOUNT_EMAIL=your-account-email
-FREEPIK_ACCOUNT_PASSWORD=your-account-password
+
+# Preferred multi-account setup
+FREEPIK_ACCOUNT_1_EMAIL=first-account@example.com
+FREEPIK_ACCOUNT_1_PASSWORD=first-account-password
+FREEPIK_ACCOUNT_2_EMAIL=second-account@example.com
+FREEPIK_ACCOUNT_2_PASSWORD=second-account-password
+
+# Existing deployments can keep using these legacy single-account names.
+# If ACCOUNT_1 is not configured, this legacy account is tried first.
+FREEPIK_ACCOUNT_EMAIL=existing-account@example.com
+FREEPIK_ACCOUNT_PASSWORD=existing-account-password
 ```
 
 Do **not** put the real email/password in GitHub, `.env.example`, frontend code, or application logs. The Docker image includes Chromium and the backend uses Playwright only when this fallback is enabled. Website authentication can require verification or UI-selector updates; if Freepik/Magnific changes its login/download controls, the optional `FREEPIK_*_SELECTOR` variables in `backend/.env.example` can be overridden without changing code.

@@ -4,25 +4,72 @@ import os
 from pathlib import Path
 import tempfile
 
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_MAX_ACCOUNTS = 10
 
-def account_fallback_configured() -> bool:
-    return bool(
-        os.getenv("FREEPIK_ACCOUNT_EMAIL")
-        and os.getenv("FREEPIK_ACCOUNT_PASSWORD")
-        and os.getenv("FREEPIK_ACCOUNT_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
+
+def _fallback_enabled() -> bool:
+    return os.getenv("FREEPIK_ACCOUNT_FALLBACK", "false").lower() in _TRUE_VALUES
+
+
+def configured_accounts() -> list[tuple[str, str]]:
+    """Return configured Freepik accounts in deterministic fallback order.
+
+    Preferred multi-account variables are FREEPIK_ACCOUNT_1_EMAIL/PASSWORD,
+    FREEPIK_ACCOUNT_2_EMAIL/PASSWORD, and so on. The original single-account
+    FREEPIK_ACCOUNT_EMAIL/PASSWORD variables remain supported for backwards
+    compatibility. If account 1 is not explicitly configured, the legacy
+    account is treated as account 1, followed by indexed accounts 2..10.
+    Duplicate credential pairs are ignored.
+    """
+    if not _fallback_enabled():
+        return []
+
+    accounts: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(email: str | None, password: str | None) -> None:
+        if not email or not password:
+            return
+        pair = (email.strip(), password)
+        if pair in seen:
+            return
+        seen.add(pair)
+        accounts.append(pair)
+
+    indexed_one = (
+        os.getenv("FREEPIK_ACCOUNT_1_EMAIL"),
+        os.getenv("FREEPIK_ACCOUNT_1_PASSWORD"),
+    )
+    legacy = (
+        os.getenv("FREEPIK_ACCOUNT_EMAIL"),
+        os.getenv("FREEPIK_ACCOUNT_PASSWORD"),
     )
 
+    # Preserve an existing deployment that already uses the legacy names.
+    if not all(indexed_one):
+        add(*legacy)
 
-def download_with_account(resource_url: str) -> bytes:
-    """Download a Freepik/Magnific stock resource with the configured account.
+    for index in range(1, _MAX_ACCOUNTS + 1):
+        add(
+            os.getenv(f"FREEPIK_ACCOUNT_{index}_EMAIL"),
+            os.getenv(f"FREEPIK_ACCOUNT_{index}_PASSWORD"),
+        )
 
-    This is intentionally a fallback behind an explicit feature flag. The normal
-    stock API remains the preferred path. Website UI automation can change over
-    time, so selectors can be overridden through environment variables without
-    editing application code.
-    """
-    email = os.getenv("FREEPIK_ACCOUNT_EMAIL")
-    password = os.getenv("FREEPIK_ACCOUNT_PASSWORD")
+    # If both legacy and explicit account 1 exist, keep legacy as a final
+    # backwards-compatible fallback unless it duplicates an indexed account.
+    if all(indexed_one):
+        add(*legacy)
+
+    return accounts
+
+
+def account_fallback_configured() -> bool:
+    return bool(configured_accounts())
+
+
+def download_with_account(resource_url: str, *, email: str, password: str) -> bytes:
+    """Download a Freepik/Magnific stock resource with one account."""
     if not email or not password:
         raise ValueError("Freepik account credentials are not configured.")
 
@@ -38,10 +85,7 @@ def download_with_account(resource_url: str) -> bytes:
     )
     email_selector = os.getenv("FREEPIK_EMAIL_SELECTOR", 'input[type="email"]')
     password_selector = os.getenv("FREEPIK_PASSWORD_SELECTOR", 'input[type="password"]')
-    submit_selector = os.getenv(
-        "FREEPIK_SUBMIT_SELECTOR",
-        'button[type="submit"]',
-    )
+    submit_selector = os.getenv("FREEPIK_SUBMIT_SELECTOR", 'button[type="submit"]')
     chromium_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "/usr/bin/chromium")
     timeout_ms = int(os.getenv("FREEPIK_BROWSER_TIMEOUT_MS", "30000"))
 
@@ -60,12 +104,9 @@ def download_with_account(resource_url: str) -> bytes:
             page.locator(password_selector).first.fill(password)
             page.locator(submit_selector).first.click()
 
-            # Successful sign-in normally navigates away from the login form.
             try:
                 page.locator(password_selector).first.wait_for(state="detached", timeout=timeout_ms)
             except PlaywrightTimeoutError:
-                # Some versions keep the element mounted; continue only if the
-                # browser has left the login URL.
                 if "log-in" in page.url or "login" in page.url:
                     raise ValueError(
                         "Freepik/Magnific account sign-in did not complete. "
@@ -100,7 +141,7 @@ def download_with_account(resource_url: str) -> bytes:
                         payload = target.read_bytes()
                     if payload:
                         return payload
-                except Exception as exc:  # selector/UI variants are expected here
+                except Exception as exc:
                     last_error = exc
 
             raise ValueError(
@@ -110,3 +151,19 @@ def download_with_account(resource_url: str) -> bytes:
         finally:
             context.close()
             browser.close()
+
+
+def download_with_accounts(resource_url: str) -> bytes:
+    """Try each configured account in order without exposing credentials."""
+    accounts = configured_accounts()
+    if not accounts:
+        raise ValueError("No Freepik account fallback credentials are configured.")
+
+    failures: list[str] = []
+    for position, (email, password) in enumerate(accounts, start=1):
+        try:
+            return download_with_account(resource_url, email=email, password=password)
+        except Exception as exc:
+            failures.append(f"account {position}: {exc}")
+
+    raise ValueError("All configured Freepik accounts failed (" + "; ".join(failures) + ").")

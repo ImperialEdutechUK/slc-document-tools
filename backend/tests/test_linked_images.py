@@ -242,7 +242,7 @@ class LinkedImageTests(unittest.TestCase):
         self.assertEqual("manual_override", result.entries[0].status)
 
     @patch.dict("os.environ", {"FREEPIK_ACCOUNT_FALLBACK": "true", "FREEPIK_ACCOUNT_EMAIL": "user@example.com", "FREEPIK_ACCOUNT_PASSWORD": "secret"}, clear=True)
-    @patch("app.services.linked_images.download_with_account")
+    @patch("app.services.linked_images.download_with_accounts")
     def test_account_fallback_is_used_when_api_key_is_missing(self, account_download):
         account_download.return_value = png_bytes()
         payload = _download_stock_resource(
@@ -254,7 +254,7 @@ class LinkedImageTests(unittest.TestCase):
         )
 
     @patch.dict("os.environ", {"FREEPIK_ACCOUNT_FALLBACK": "false"}, clear=True)
-    @patch("app.services.linked_images.download_with_account")
+    @patch("app.services.linked_images.download_with_accounts")
     def test_account_fallback_is_disabled_by_default(self, account_download):
         with self.assertRaisesRegex(ValueError, "stock image could not be downloaded"):
             _download_stock_resource(

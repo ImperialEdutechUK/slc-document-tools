@@ -18,7 +18,7 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 from ..formatter.image_placement import prepare_image_catalog
-from .freepik_account import account_fallback_configured, download_with_account
+from .freepik_account import account_fallback_configured, download_with_accounts
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -452,7 +452,7 @@ def _download_stock_resource(url: str) -> bytes:
 
     if account_fallback_configured():
         try:
-            payload = download_with_account(url)
+            payload = download_with_accounts(url)
             _verify_image(payload)
             return payload
         except Exception as exc:
