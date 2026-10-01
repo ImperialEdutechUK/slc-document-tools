@@ -228,3 +228,17 @@ The next useful production check is to run the formatter against a representativ
 ## Legacy Magnific / Freepik resource links
 
 The linked-image downloader first tries the numeric resource ID contained in the document URL. If that historical ID returns 404, it searches the official Magnific stock catalogue using the page slug/title and retries the download only when a high-confidence matching resource is found. This avoids silently inserting an unrelated stock image when an old resource ID has been migrated or retired.
+
+## Freepik/Magnific authenticated session fallback
+
+If Railway cannot see the Magnific email/password form, use a browser session captured on a trusted local computer instead of automating the login screen.
+
+1. From the `backend` folder, install Playwright if needed: `pip install playwright` and `playwright install chromium`.
+2. Run `python scripts/capture_freepik_session.py`.
+3. A normal browser opens. Sign in to Magnific/Freepik yourself and complete any verification or 2FA.
+4. Return to the terminal and press Enter after you are fully signed in.
+5. Copy the printed base64 value into Railway as `FREEPIK_ACCOUNT_1_STORAGE_STATE_B64`.
+6. For a second account, repeat the process in a fresh browser run and save it as `FREEPIK_ACCOUNT_2_STORAGE_STATE_B64`.
+7. Keep `FREEPIK_ACCOUNT_FALLBACK=true` and redeploy the backend.
+
+Saved-session fallback is attempted before automated credential login. Session values contain authentication material and must be treated like passwords: keep them only in Railway secrets/environment variables, do not commit them to Git, and refresh them if Magnific expires or revokes the session.

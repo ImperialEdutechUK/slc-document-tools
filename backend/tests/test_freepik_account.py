@@ -33,6 +33,37 @@ class TestFreepikAccountConfiguration(unittest.TestCase):
             configured_accounts(),
         )
 
+
+    @patch.dict(
+        os.environ,
+        {
+            "FREEPIK_ACCOUNT_FALLBACK": "true",
+            "FREEPIK_ACCOUNT_1_STORAGE_STATE_JSON": '{"cookies": [], "origins": []}',
+        },
+        clear=True,
+    )
+    def test_saved_session_counts_as_configured_fallback(self):
+        self.assertTrue(account_fallback_configured())
+
+    @patch.dict(
+        os.environ,
+        {
+            "FREEPIK_ACCOUNT_FALLBACK": "true",
+            "FREEPIK_ACCOUNT_1_STORAGE_STATE_JSON": '{"cookies": [], "origins": []}',
+            "FREEPIK_ACCOUNT_1_EMAIL": "first@example.com",
+            "FREEPIK_ACCOUNT_1_PASSWORD": "first-secret",
+        },
+        clear=True,
+    )
+    @patch("app.services.freepik_account.download_with_account")
+    @patch("app.services.freepik_account.download_with_storage_state")
+    def test_saved_session_is_tried_before_credential_login(self, session_download, account_download):
+        session_download.side_effect = ValueError("expired")
+        account_download.return_value = b"image-bytes"
+        self.assertEqual(b"image-bytes", download_with_accounts("https://www.freepik.com/example"))
+        self.assertEqual(1, session_download.call_count)
+        self.assertEqual(1, account_download.call_count)
+
     @patch.dict(
         os.environ,
         {

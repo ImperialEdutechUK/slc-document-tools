@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -66,8 +68,52 @@ def configured_accounts() -> list[tuple[str, str]]:
     return accounts
 
 
+def _decode_storage_state(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        if value.startswith("{"):
+            data = json.loads(value)
+        else:
+            data = json.loads(base64.b64decode(value).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Freepik storage state is not valid JSON/base64 JSON.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Freepik storage state must decode to a JSON object.")
+    return data
+
+
+def _storage_state_for_account(index: int) -> dict | None:
+    raw = os.getenv(f"FREEPIK_ACCOUNT_{index}_STORAGE_STATE_B64") or os.getenv(
+        f"FREEPIK_ACCOUNT_{index}_STORAGE_STATE_JSON"
+    )
+    return _decode_storage_state(raw)
+
+
+def _legacy_storage_state() -> dict | None:
+    raw = os.getenv("FREEPIK_STORAGE_STATE_B64") or os.getenv("FREEPIK_STORAGE_STATE_JSON")
+    return _decode_storage_state(raw)
+
+
+def _configured_storage_states() -> list[tuple[str, dict]]:
+    if not _fallback_enabled():
+        return []
+    states: list[tuple[str, dict]] = []
+    for index in range(1, _MAX_ACCOUNTS + 1):
+        state = _storage_state_for_account(index)
+        if state:
+            states.append((f"account {index}", state))
+    legacy = _legacy_storage_state()
+    if legacy:
+        states.append(("legacy account", legacy))
+    return states
+
+
 def account_fallback_configured() -> bool:
-    return bool(configured_accounts())
+    return bool(configured_accounts() or _configured_storage_states())
 
 
 def _page_scopes(page):
@@ -340,17 +386,113 @@ def download_with_account(resource_url: str, *, email: str, password: str) -> by
         return future.result()
 
 
+def _download_with_storage_state_sync(resource_url: str, *, storage_state: dict) -> bytes:
+    """Download with an already authenticated Playwright storage state.
+
+    This intentionally does not attempt to automate Magnific login. The session
+    must be created by a user signing in normally in a real browser first.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise ValueError("Playwright is not installed for the Freepik account fallback.") from exc
+
+    chromium_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "/usr/bin/chromium")
+    timeout_ms = int(os.getenv("FREEPIK_BROWSER_TIMEOUT_MS", "45000"))
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            executable_path=chromium_path if Path(chromium_path).exists() else None,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = browser.new_context(accept_downloads=True, storage_state=storage_state)
+        page = context.new_page()
+        page.set_default_timeout(timeout_ms)
+        try:
+            page.goto(resource_url, wait_until="domcontentloaded")
+
+            body_text = ""
+            try:
+                body_text = page.locator("body").inner_text(timeout=3000).lower()
+            except Exception:
+                pass
+            if "sign in" in body_text and ("login" in page.url.lower() or "log-in" in page.url.lower()):
+                raise ValueError(
+                    "Saved Magnific session is no longer authenticated. Capture a fresh browser session."
+                )
+
+            custom_download_selector = os.getenv("FREEPIK_DOWNLOAD_SELECTOR")
+            candidates = []
+            if custom_download_selector:
+                candidates.append(page.locator(custom_download_selector).first)
+            candidates.extend(
+                [
+                    page.get_by_role("button", name="Download", exact=False).first,
+                    page.get_by_role("link", name="Download", exact=False).first,
+                    page.locator("a[download]").first,
+                ]
+            )
+
+            last_error: Exception | None = None
+            for candidate in candidates:
+                try:
+                    if not candidate.is_visible(timeout=3000):
+                        continue
+                    with page.expect_download(timeout=timeout_ms) as download_info:
+                        candidate.click()
+                    download = download_info.value
+                    with tempfile.TemporaryDirectory() as tmp:
+                        target = Path(tmp) / (download.suggested_filename or "freepik-download")
+                        download.save_as(str(target))
+                        payload = target.read_bytes()
+                    if payload:
+                        return payload
+                except Exception as exc:
+                    last_error = exc
+
+            raise ValueError(
+                "Saved Magnific session opened the resource, but no downloadable asset was captured. "
+                "The session may lack access to this stock item, or the Download control may have changed."
+            ) from last_error
+        finally:
+            context.close()
+            browser.close()
+
+
+def download_with_storage_state(resource_url: str, *, storage_state: dict) -> bytes:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _download_with_storage_state_sync(resource_url, storage_state=storage_state)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="freepik-session") as executor:
+        future = executor.submit(
+            _download_with_storage_state_sync, resource_url, storage_state=storage_state
+        )
+        return future.result()
+
+
 def download_with_accounts(resource_url: str) -> bytes:
-    """Try each configured account in order without exposing credentials."""
+    """Try saved authenticated sessions first, then credential login fallbacks."""
+    sessions = _configured_storage_states()
     accounts = configured_accounts()
-    if not accounts:
-        raise ValueError("No Freepik account fallback credentials are configured.")
+    if not sessions and not accounts:
+        raise ValueError(
+            "No Freepik account fallback credentials or saved browser sessions are configured."
+        )
 
     failures: list[str] = []
+    for label, state in sessions:
+        try:
+            return download_with_storage_state(resource_url, storage_state=state)
+        except Exception as exc:
+            failures.append(f"{label} saved session: {exc}")
+
     for position, (email, password) in enumerate(accounts, start=1):
         try:
             return download_with_account(resource_url, email=email, password=password)
         except Exception as exc:
-            failures.append(f"account {position}: {exc}")
+            failures.append(f"account {position} credential login: {exc}")
 
     raise ValueError("All configured Freepik accounts failed (" + "; ".join(failures) + ").")
