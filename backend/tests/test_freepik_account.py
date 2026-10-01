@@ -1,10 +1,13 @@
+import asyncio
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
 from app.services.freepik_account import (
     account_fallback_configured,
     configured_accounts,
+    download_with_account,
     download_with_accounts,
 )
 
@@ -92,6 +95,29 @@ class TestFreepikAccountConfiguration(unittest.TestCase):
         second = single_download.call_args_list[1].kwargs
         self.assertEqual("first@example.com", first["email"])
         self.assertEqual("second@example.com", second["email"])
+
+    @patch("app.services.freepik_account._download_with_account_sync")
+    def test_single_account_uses_worker_thread_inside_asyncio_loop(self, sync_download):
+        caller_thread = threading.get_ident()
+
+        def fake_download(resource_url, *, email, password):
+            self.assertNotEqual(caller_thread, threading.get_ident())
+            self.assertEqual("https://www.freepik.com/example", resource_url)
+            self.assertEqual("first@example.com", email)
+            self.assertEqual("secret", password)
+            return b"image-bytes"
+
+        sync_download.side_effect = fake_download
+
+        async def run():
+            return download_with_account(
+                "https://www.freepik.com/example",
+                email="first@example.com",
+                password="secret",
+            )
+
+        self.assertEqual(b"image-bytes", asyncio.run(run()))
+
 
 
 if __name__ == "__main__":

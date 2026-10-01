@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import tempfile
@@ -68,8 +70,8 @@ def account_fallback_configured() -> bool:
     return bool(configured_accounts())
 
 
-def download_with_account(resource_url: str, *, email: str, password: str) -> bytes:
-    """Download a Freepik/Magnific stock resource with one account."""
+def _download_with_account_sync(resource_url: str, *, email: str, password: str) -> bytes:
+    """Run the Playwright sync workflow in a thread that has no asyncio loop."""
     if not email or not password:
         raise ValueError("Freepik account credentials are not configured.")
 
@@ -151,6 +153,29 @@ def download_with_account(resource_url: str, *, email: str, password: str) -> by
         finally:
             context.close()
             browser.close()
+
+
+def download_with_account(resource_url: str, *, email: str, password: str) -> bytes:
+    """Download with one account without calling Playwright sync API on an asyncio thread.
+
+    FastAPI endpoints may invoke the linked-image pipeline while an asyncio event
+    loop is already running. Playwright's sync API intentionally refuses to run
+    on that same thread. In that case, execute the browser workflow in a short-
+    lived worker thread. Normal synchronous callers still run directly.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _download_with_account_sync(resource_url, email=email, password=password)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="freepik-playwright") as executor:
+        future = executor.submit(
+            _download_with_account_sync,
+            resource_url,
+            email=email,
+            password=password,
+        )
+        return future.result()
 
 
 def download_with_accounts(resource_url: str) -> bytes:
