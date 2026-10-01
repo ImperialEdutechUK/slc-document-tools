@@ -70,6 +70,34 @@ def account_fallback_configured() -> bool:
     return bool(configured_accounts())
 
 
+def _page_scopes(page):
+    """Return the main page plus child frames for auth widgets embedded in iframes."""
+    scopes = [page]
+    for frame in page.frames:
+        if frame != page.main_frame:
+            scopes.append(frame)
+    return scopes
+
+
+def _first_visible(locator_candidates, *, timeout_ms: int = 5000):
+    """Return the first visible Playwright locator from a list of locators."""
+    for locator in locator_candidates:
+        try:
+            if locator.count() and locator.first.is_visible(timeout=timeout_ms):
+                return locator.first
+        except Exception:
+            continue
+    return None
+
+
+def _click_first_visible(locator_candidates, *, timeout_ms: int = 5000) -> bool:
+    locator = _first_visible(locator_candidates, timeout_ms=timeout_ms)
+    if locator is None:
+        return False
+    locator.click()
+    return True
+
+
 def _download_with_account_sync(resource_url: str, *, email: str, password: str) -> bytes:
     """Run the Playwright sync workflow in a thread that has no asyncio loop."""
     if not email or not password:
@@ -81,15 +109,12 @@ def _download_with_account_sync(resource_url: str, *, email: str, password: str)
     except ImportError as exc:
         raise ValueError("Playwright is not installed for the Freepik account fallback.") from exc
 
-    login_url = os.getenv(
-        "FREEPIK_LOGIN_URL",
-        "https://www.magnific.com/log-in?client_id=magnific&lang=en",
-    )
-    email_selector = os.getenv("FREEPIK_EMAIL_SELECTOR", 'input[type="email"]')
-    password_selector = os.getenv("FREEPIK_PASSWORD_SELECTOR", 'input[type="password"]')
-    submit_selector = os.getenv("FREEPIK_SUBMIT_SELECTOR", 'button[type="submit"]')
+    login_url = os.getenv("FREEPIK_LOGIN_URL", "https://www.magnific.com/login")
+    custom_email_selector = os.getenv("FREEPIK_EMAIL_SELECTOR")
+    custom_password_selector = os.getenv("FREEPIK_PASSWORD_SELECTOR")
+    custom_submit_selector = os.getenv("FREEPIK_SUBMIT_SELECTOR")
     chromium_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE", "/usr/bin/chromium")
-    timeout_ms = int(os.getenv("FREEPIK_BROWSER_TIMEOUT_MS", "30000"))
+    timeout_ms = int(os.getenv("FREEPIK_BROWSER_TIMEOUT_MS", "45000"))
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -102,18 +127,156 @@ def _download_with_account_sync(resource_url: str, *, email: str, password: str)
         page.set_default_timeout(timeout_ms)
         try:
             page.goto(login_url, wait_until="domcontentloaded")
-            page.locator(email_selector).first.fill(email)
-            page.locator(password_selector).first.fill(password)
-            page.locator(submit_selector).first.click()
 
-            try:
-                page.locator(password_selector).first.wait_for(state="detached", timeout=timeout_ms)
-            except PlaywrightTimeoutError:
-                if "log-in" in page.url or "login" in page.url:
-                    raise ValueError(
-                        "Freepik/Magnific account sign-in did not complete. "
-                        "The site may require a verification step or updated selectors."
+            # Magnific's current sign-in screen may first present Google/Apple and
+            # a separate "Continue with email" control before rendering the form.
+            scopes = _page_scopes(page)
+
+            cookie_candidates = []
+            for scope in scopes:
+                cookie_candidates.extend(
+                    [
+                        scope.get_by_role("button", name="Accept all", exact=False),
+                        scope.get_by_role("button", name="Accept", exact=True),
+                        scope.get_by_role("button", name="Allow all", exact=False),
+                    ]
+                )
+            _click_first_visible(cookie_candidates, timeout_ms=1500)
+
+            email_entry_candidates = []
+            for scope in scopes:
+                email_entry_candidates.extend(
+                    [
+                        scope.get_by_role("button", name="Continue with email", exact=False),
+                        scope.get_by_role("link", name="Continue with email", exact=False),
+                        scope.get_by_role("button", name="Sign in with email", exact=False),
+                        scope.get_by_role("link", name="Sign in with email", exact=False),
+                        scope.get_by_text("Continue with email", exact=False),
+                        scope.get_by_text("Sign in with email", exact=False),
+                    ]
+                )
+            _click_first_visible(email_entry_candidates, timeout_ms=5000)
+            page.wait_for_timeout(500)
+            scopes = _page_scopes(page)
+
+            email_candidates = []
+            for scope in scopes:
+                if custom_email_selector:
+                    email_candidates.append(scope.locator(custom_email_selector))
+                email_candidates.extend(
+                    [
+                        scope.locator('input[type="email"]'),
+                        scope.locator('input[name="email"]'),
+                        scope.locator('input[autocomplete="email"]'),
+                        scope.locator('input[placeholder*="email" i]'),
+                        scope.get_by_label("Email", exact=False),
+                    ]
+                )
+            email_box = _first_visible(email_candidates, timeout_ms=10000)
+            if email_box is None:
+                raise ValueError(
+                    "Magnific login email field was not found after opening the email sign-in flow. "
+                    f"Current page: {page.url}. The site may be showing a verification, consent, "
+                    "bot-protection, or changed login screen."
+                )
+            email_box.fill(email)
+
+            password_candidates = []
+            for scope in _page_scopes(page):
+                if custom_password_selector:
+                    password_candidates.append(scope.locator(custom_password_selector))
+                password_candidates.extend(
+                    [
+                        scope.locator('input[type="password"]'),
+                        scope.locator('input[name="password"]'),
+                        scope.locator('input[autocomplete="current-password"]'),
+                        scope.locator('input[placeholder*="password" i]'),
+                        scope.get_by_label("Password", exact=False),
+                    ]
+                )
+
+            password_box = _first_visible(password_candidates, timeout_ms=2500)
+            if password_box is None:
+                # Some auth flows ask for email first, then render the password
+                # field only after Continue/Next.
+                advance_candidates = []
+                for scope in _page_scopes(page):
+                    if custom_submit_selector:
+                        advance_candidates.append(scope.locator(custom_submit_selector))
+                    advance_candidates.extend(
+                        [
+                            scope.get_by_role("button", name="Continue", exact=False),
+                            scope.get_by_role("button", name="Next", exact=False),
+                            scope.get_by_role("button", name="Sign in", exact=False),
+                            scope.locator('button[type="submit"]'),
+                        ]
                     )
+                if not _click_first_visible(advance_candidates, timeout_ms=5000):
+                    email_box.press("Enter")
+                password_box = _first_visible(password_candidates, timeout_ms=10000)
+
+            if password_box is None:
+                raise ValueError(
+                    "Magnific password field was not found after submitting the email. "
+                    f"Current page: {page.url}. The account may use Google/Apple sign-in, "
+                    "or Magnific may be requesting verification/2FA."
+                )
+
+            password_box.fill(password)
+
+            submit_candidates = []
+            for scope in _page_scopes(page):
+                if custom_submit_selector:
+                    submit_candidates.append(scope.locator(custom_submit_selector))
+                submit_candidates.extend(
+                    [
+                        scope.get_by_role("button", name="Sign in", exact=False),
+                        scope.get_by_role("button", name="Log in", exact=False),
+                        scope.get_by_role("button", name="Continue", exact=False),
+                        scope.locator('button[type="submit"]'),
+                    ]
+                )
+            if not _click_first_visible(submit_candidates, timeout_ms=5000):
+                password_box.press("Enter")
+
+            # Allow redirects/callbacks to settle. Do not depend on the password
+            # field detaching because modern auth UIs can keep it mounted.
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(1500)
+
+            lowered_url = page.url.lower()
+            password_still_visible = _first_visible(password_candidates, timeout_ms=1500) is not None
+            verification_visible = False
+            try:
+                visible_text = page.locator("body").inner_text(timeout=2000).lower()
+                verification_visible = any(
+                    marker in visible_text
+                    for marker in (
+                        "verification code",
+                        "security code",
+                        "two-factor",
+                        "two factor",
+                        "check your email",
+                        "verify your identity",
+                        "captcha",
+                    )
+                )
+            except Exception:
+                pass
+
+            if verification_visible:
+                raise ValueError(
+                    "Magnific requires an interactive verification/2FA step for this login. "
+                    "A headless Railway browser cannot complete that step automatically."
+                )
+            if password_still_visible and ("login" in lowered_url or "log-in" in lowered_url):
+                raise ValueError(
+                    "Magnific account sign-in did not complete. Check the account credentials, "
+                    "sign-in method, or whether Magnific is requiring verification."
+                )
 
             page.goto(resource_url, wait_until="domcontentloaded")
 
@@ -153,7 +316,6 @@ def _download_with_account_sync(resource_url: str, *, email: str, password: str)
         finally:
             context.close()
             browser.close()
-
 
 def download_with_account(resource_url: str, *, email: str, password: str) -> bytes:
     """Download with one account without calling Playwright sync API on an asyncio thread.
