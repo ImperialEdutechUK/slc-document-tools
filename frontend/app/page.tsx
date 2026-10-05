@@ -2375,7 +2375,11 @@ function PdfCoverPanel() {
             Awarding Body Name
             <input
               value={awardingBody}
-              onChange={(event) => setAwardingBody(event.target.value)}
+              onChange={(event) => {
+                setAwardingBody(event.target.value);
+                setJob(null);
+                setError("");
+              }}
               placeholder="e.g. Qualifi"
               required
             />
@@ -2385,7 +2389,11 @@ function PdfCoverPanel() {
             Course Name
             <input
               value={courseName}
-              onChange={(event) => setCourseName(event.target.value)}
+              onChange={(event) => {
+                setCourseName(event.target.value);
+                setJob(null);
+                setError("");
+              }}
               placeholder="e.g. Level 5 Diploma in Business Management"
               required
             />
@@ -2395,7 +2403,11 @@ function PdfCoverPanel() {
             Unit Name
             <input
               value={unitName}
-              onChange={(event) => setUnitName(event.target.value)}
+              onChange={(event) => {
+                setUnitName(event.target.value);
+                setJob(null);
+                setError("");
+              }}
               placeholder="e.g. Unit 3: Business Strategy"
               required
             />

@@ -446,23 +446,49 @@ def replace_pdf_cover_with_three_lines(
             font_name = "helv"
             font = fitz.Font(fontname="helv")
 
-        # Use one shared medium text size. If the longest line is too wide,
-        # reduce ALL three together so they remain exactly the same size.
-        fontsize = 24.0
-        minimum_fontsize = 12.0
+        # Use one shared medium text size. Work out the exact largest size
+        # that allows the widest of the three values to fit on ONE line. This
+        # avoids PyMuPDF insert_textbox() false negatives caused by vertical
+        # font metrics (which previously produced the misleading "too long"
+        # error even for short text such as "test").
+        maximum_fontsize = 24.0
+        minimum_fontsize = 8.0
         safe_width = page_rect.width * 0.84
-        while fontsize > minimum_fontsize:
-            widest = max(font.text_length(value, fontsize=fontsize) for value in values)
-            if widest <= safe_width:
-                break
-            fontsize -= 0.5
+
+        widest_at_one_point = max(
+            font.text_length(value, fontsize=1.0) for value in values
+        )
+        if widest_at_one_point <= 0:
+            raise PdfEditingError("The cover text could not be measured safely.")
+
+        fontsize = min(maximum_fontsize, safe_width / widest_at_one_point)
+        fontsize = max(minimum_fontsize, fontsize)
+
+        # If a line is exceptionally long, keep reducing slightly below the
+        # normal minimum rather than failing with a misleading textbox error.
+        # A hard floor prevents unreadable output for pathological input.
+        hard_floor = 5.0
+        while (
+            max(font.text_length(value, fontsize=fontsize) for value in values)
+            > safe_width
+            and fontsize > hard_floor
+        ):
+            fontsize -= 0.25
+
+        widest = max(font.text_length(value, fontsize=fontsize) for value in values)
+        if widest > safe_width + 0.1:
+            raise PdfEditingError(
+                "One of the cover text values is too long to fit safely on the cover. "
+                "Please shorten that value."
+            )
 
         # Three single-line rows, horizontally centred as one cover title block.
+        # We use insert_text() with an explicitly calculated X position instead
+        # of insert_textbox(). That guarantees each supplied value remains a
+        # single line and removes the vertical textbox-fit bug.
         line_height = fontsize * 1.55
         block_height = line_height * 3
         top = (page_rect.height - block_height) / 2.0
-        left = page_rect.width * 0.08
-        right = page_rect.width * 0.92
 
         # A subtle translucent panel makes white text readable on both dark and
         # light cover images without changing the requested equal text sizing.
@@ -481,22 +507,25 @@ def replace_pdf_cover_with_three_lines(
             overlay=True,
         )
 
+        # Font metrics are expressed relative to the font size. Using them to
+        # calculate the baseline centres every line vertically within its row.
+        ascender = float(getattr(font, "ascender", 0.9))
+        descender = float(getattr(font, "descender", -0.2))
+
         for index, value in enumerate(values):
-            row_top = top + index * line_height
-            row_rect = fitz.Rect(left, row_top, right, row_top + line_height)
-            remaining = cover_page.insert_textbox(
-                row_rect,
+            text_width = font.text_length(value, fontsize=fontsize)
+            x = (page_rect.width - text_width) / 2.0
+            row_center_y = top + (index + 0.5) * line_height
+            baseline_y = row_center_y + ((ascender + descender) * fontsize / 2.0)
+
+            cover_page.insert_text(
+                fitz.Point(x, baseline_y),
                 value,
                 fontname=font_name,
                 fontsize=fontsize,
                 color=(1, 1, 1),
-                align=fitz.TEXT_ALIGN_CENTER,
                 overlay=True,
             )
-            if remaining < 0:
-                raise PdfEditingError(
-                    "One of the cover text values is too long to fit on a single line."
-                )
 
         if source.page_count > 1:
             output.insert_pdf(source, from_page=1, to_page=source.page_count - 1)

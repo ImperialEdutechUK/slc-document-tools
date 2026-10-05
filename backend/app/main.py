@@ -49,7 +49,7 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.05-v14-pdf-cover-three-lines"
+BUILD_VERSION = "2026.10.05-v15-pdf-cover-text-fix"
 
 app = FastAPI(title=APP_NAME, version="0.5.0")
 

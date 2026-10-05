@@ -122,6 +122,48 @@ class PdfEditingTests(unittest.TestCase):
         self.assertGreaterEqual(details["font_size"], 12.0)
         self.assertLessEqual(details["font_size"], 24.0)
 
+    def test_three_line_cover_accepts_short_text_without_false_too_long_error(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (1200, 1600), (30, 90, 120)).save(image_buffer, format="PNG")
+
+        result, details = replace_pdf_cover_with_three_lines(
+            make_pdf(2),
+            image_buffer.getvalue(),
+            "cover.png",
+            "test",
+            "test",
+            "test",
+        )
+
+        document = fitz.open(stream=result, filetype="pdf")
+        first_page_text = document[0].get_text()
+        document.close()
+
+        self.assertEqual(first_page_text.count("test"), 3)
+        self.assertEqual(details["font_size"], 24.0)
+
+    def test_three_line_cover_shrinks_all_lines_together_for_long_course_name(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (1200, 1600), (30, 90, 120)).save(image_buffer, format="PNG")
+        long_course = "Level 5 Extended Diploma in Business Management and Strategic Leadership"
+
+        result, details = replace_pdf_cover_with_three_lines(
+            make_pdf(2),
+            image_buffer.getvalue(),
+            "cover.png",
+            "Qualifi",
+            long_course,
+            "Unit 3: Business Strategy",
+        )
+
+        document = fitz.open(stream=result, filetype="pdf")
+        first_page_text = document[0].get_text()
+        document.close()
+
+        self.assertIn(long_course, first_page_text)
+        self.assertLess(details["font_size"], 24.0)
+        self.assertGreaterEqual(details["font_size"], 5.0)
+
     def test_three_line_cover_requires_all_text_fields(self):
         image_buffer = BytesIO()
         Image.new("RGB", (600, 800), (30, 90, 120)).save(image_buffer, format="PNG")
