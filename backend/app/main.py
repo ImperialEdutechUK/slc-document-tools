@@ -26,6 +26,7 @@ from .formatter.pdf_editing import (
     get_pdf_page_count,
     remove_pdf_pages,
     replace_pdf_cover_and_text,
+    replace_pdf_cover_with_three_lines,
 )
 from .formatter.simple_editing import (
     SimpleEditingError,
@@ -48,7 +49,7 @@ from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.05-v13-pdf-cover-text"
+BUILD_VERSION = "2026.10.05-v14-pdf-cover-three-lines"
 
 app = FastAPI(title=APP_NAME, version="0.5.0")
 
@@ -722,6 +723,61 @@ async def pdf_remove_pages(
     except (ValueError, PdfEditingError) as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/pdf/replace-cover", response_model=JobResponse)
+async def pdf_replace_cover(
+    file: Annotated[UploadFile, File(...)],
+    cover: Annotated[UploadFile, File(...)],
+    awarding_body: Annotated[str, Form()],
+    course_name: Annotated[str, Form()],
+    unit_name: Annotated[str, Form()],
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(file.filename or "").suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Upload a PDF file.")
+
+    cover_suffix = Path(cover.filename or "").suffix.lower()
+    if cover_suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(
+            status_code=400,
+            detail="The replacement cover must be a PDF, JPG, PNG, or WebP file.",
+        )
+
+    job = _new_job(db, "pdf_replace_cover", file.filename)
+
+    try:
+        payload = await file.read()
+        cover_payload = await cover.read()
+        updated, details = replace_pdf_cover_with_three_lines(
+            payload,
+            cover_payload,
+            cover.filename,
+            awarding_body,
+            course_name,
+            unit_name,
+        )
+        details["build"] = BUILD_VERSION
+
+        stem = _safe_stem(file.filename, "pdf")
+        output_filename = f"{stem}_cover_updated.pdf"
+        output_key = f"jobs/{job.id}/{output_filename}"
+        storage.put_bytes(output_key, updated, "application/pdf")
+
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(job)
+    except (PdfEditingError, StorageError) as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="PDF cover replacement failed.") from exc
 
 
 @app.post(f"{API_PREFIX}/pdf/replace-cover-text", response_model=JobResponse)

@@ -12,6 +12,7 @@ from app.formatter.pdf_editing import (
     remove_pdf_pages,
     replace_pdf_cover,
     replace_pdf_cover_and_text,
+    replace_pdf_cover_with_three_lines,
     replace_pdf_text,
 )
 
@@ -96,6 +97,44 @@ class PdfEditingTests(unittest.TestCase):
         self.assertEqual(len(reader.pages), 2)
         self.assertEqual(float(reader.pages[0].mediabox.width), 300)
         self.assertEqual(float(reader.pages[0].mediabox.height), 400)
+
+    def test_replaces_cover_with_three_equal_size_text_lines(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (1200, 1600), (30, 90, 120)).save(image_buffer, format="PNG")
+
+        result, details = replace_pdf_cover_with_three_lines(
+            make_pdf(3),
+            image_buffer.getvalue(),
+            "cover.png",
+            "Qualifi",
+            "Level 5 Diploma in Business Management",
+            "Unit 3: Business Strategy",
+        )
+
+        document = fitz.open(stream=result, filetype="pdf")
+        first_page_text = document[0].get_text()
+        document.close()
+
+        self.assertIn("Qualifi", first_page_text)
+        self.assertIn("Level 5 Diploma in Business Management", first_page_text)
+        self.assertIn("Unit 3: Business Strategy", first_page_text)
+        self.assertEqual(details["pages"], 3)
+        self.assertGreaterEqual(details["font_size"], 12.0)
+        self.assertLessEqual(details["font_size"], 24.0)
+
+    def test_three_line_cover_requires_all_text_fields(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (600, 800), (30, 90, 120)).save(image_buffer, format="PNG")
+
+        with self.assertRaises(PdfEditingError):
+            replace_pdf_cover_with_three_lines(
+                make_pdf(2),
+                image_buffer.getvalue(),
+                "cover.png",
+                "Qualifi",
+                "",
+                "Unit 1",
+            )
 
     def test_replaces_exact_visible_text(self):
         result, report = replace_pdf_text(

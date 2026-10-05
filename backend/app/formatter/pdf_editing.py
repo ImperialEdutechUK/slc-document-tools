@@ -371,6 +371,158 @@ def replace_pdf_text(
     return output, report
 
 
+
+def replace_pdf_cover_with_three_lines(
+    pdf_bytes: bytes,
+    cover_bytes: bytes,
+    cover_filename: str | None,
+    awarding_body: str,
+    course_name: str,
+    unit_name: str,
+) -> tuple[bytes, dict]:
+    """Replace page 1 with an image/PDF cover and add three equal-size centred text lines.
+
+    The three values always use the same font size. The shared size starts at
+    24 pt and, when needed, is reduced for all three lines together so the
+    longest line fits safely within the page. Pages 2 onward are copied
+    unchanged from the source PDF.
+    """
+    _read_pdf(pdf_bytes)
+
+    values = [
+        (awarding_body or "").strip(),
+        (course_name or "").strip(),
+        (unit_name or "").strip(),
+    ]
+    if not all(values):
+        raise PdfEditingError(
+            "Awarding body name, course name and unit name are all required."
+        )
+    if not cover_bytes:
+        raise PdfEditingError("Upload a replacement cover image.")
+
+    suffix = Path(cover_filename or "").suffix.lower()
+    if suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+        raise PdfEditingError(
+            "The replacement cover must be a PDF, JPG, PNG, or WebP file."
+        )
+
+    source = None
+    cover_doc = None
+    output = None
+    try:
+        source = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_rect = source[0].rect
+
+        output = fitz.open()
+        cover_page = output.new_page(width=page_rect.width, height=page_rect.height)
+        full_rect = fitz.Rect(0, 0, page_rect.width, page_rect.height)
+
+        if suffix == ".pdf":
+            cover_doc = fitz.open(stream=cover_bytes, filetype="pdf")
+            if cover_doc.page_count < 1:
+                raise PdfEditingError("The replacement cover PDF does not contain a page.")
+            cover_page.show_pdf_page(full_rect, cover_doc, 0, keep_proportion=False)
+        else:
+            # Validate through Pillow first so unsupported/corrupt image files
+            # produce a clear error instead of a low-level PDF exception.
+            try:
+                with Image.open(BytesIO(cover_bytes)) as image:
+                    converted = image.convert("RGB")
+                    image_buffer = BytesIO()
+                    converted.save(image_buffer, format="PNG")
+                    cover_image = image_buffer.getvalue()
+            except Exception as exc:
+                raise PdfEditingError("The replacement cover image could not be read.") from exc
+            cover_page.insert_image(full_rect, stream=cover_image, keep_proportion=False)
+
+        font_path = Path(__file__).resolve().parents[2] / "fonts" / "GARA.TTF"
+        font_name = "garamond_cover"
+        font = None
+        if font_path.exists():
+            cover_page.insert_font(fontname=font_name, fontfile=str(font_path))
+            font = fitz.Font(fontfile=str(font_path))
+        else:
+            font_name = "helv"
+            font = fitz.Font(fontname="helv")
+
+        # Use one shared medium text size. If the longest line is too wide,
+        # reduce ALL three together so they remain exactly the same size.
+        fontsize = 24.0
+        minimum_fontsize = 12.0
+        safe_width = page_rect.width * 0.84
+        while fontsize > minimum_fontsize:
+            widest = max(font.text_length(value, fontsize=fontsize) for value in values)
+            if widest <= safe_width:
+                break
+            fontsize -= 0.5
+
+        # Three single-line rows, horizontally centred as one cover title block.
+        line_height = fontsize * 1.55
+        block_height = line_height * 3
+        top = (page_rect.height - block_height) / 2.0
+        left = page_rect.width * 0.08
+        right = page_rect.width * 0.92
+
+        # A subtle translucent panel makes white text readable on both dark and
+        # light cover images without changing the requested equal text sizing.
+        panel_pad_y = fontsize * 0.65
+        panel_rect = fitz.Rect(
+            page_rect.width * 0.055,
+            top - panel_pad_y,
+            page_rect.width * 0.945,
+            top + block_height + panel_pad_y * 0.35,
+        )
+        cover_page.draw_rect(
+            panel_rect,
+            color=None,
+            fill=(0, 0, 0),
+            fill_opacity=0.34,
+            overlay=True,
+        )
+
+        for index, value in enumerate(values):
+            row_top = top + index * line_height
+            row_rect = fitz.Rect(left, row_top, right, row_top + line_height)
+            remaining = cover_page.insert_textbox(
+                row_rect,
+                value,
+                fontname=font_name,
+                fontsize=fontsize,
+                color=(1, 1, 1),
+                align=fitz.TEXT_ALIGN_CENTER,
+                overlay=True,
+            )
+            if remaining < 0:
+                raise PdfEditingError(
+                    "One of the cover text values is too long to fit on a single line."
+                )
+
+        if source.page_count > 1:
+            output.insert_pdf(source, from_page=1, to_page=source.page_count - 1)
+
+        result = output.tobytes(garbage=4, deflate=True)
+    except PdfEditingError:
+        raise
+    except Exception as exc:
+        raise PdfEditingError("The replacement cover could not be created safely.") from exc
+    finally:
+        if cover_doc is not None:
+            cover_doc.close()
+        if source is not None:
+            source.close()
+        if output is not None:
+            output.close()
+
+    return result, {
+        "cover_replaced": True,
+        "awarding_body": values[0],
+        "course_name": values[1],
+        "unit_name": values[2],
+        "font_size": round(fontsize, 1),
+        "pages": get_pdf_page_count(result),
+    }
+
 def replace_pdf_cover_and_text(
     pdf_bytes: bytes,
     *,

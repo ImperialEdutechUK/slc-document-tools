@@ -976,8 +976,27 @@ a {
 }
 
 /* -------------------------------------------------------
-   PDF COVER + TEXT REPLACEMENT
+   PDF COVER REPLACEMENT
 ------------------------------------------------------- */
+
+.cover-text-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cover-text-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .cover-text-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 .replacement-list {
   display: flex;

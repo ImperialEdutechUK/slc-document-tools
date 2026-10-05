@@ -59,11 +59,6 @@ type FooterSettings = {
   copyright_offset: number;
 };
 
-type PdfTextReplacement = {
-  find: string;
-  replace: string;
-};
-
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
 ).replace(/\/$/, "");
@@ -2251,54 +2246,29 @@ function PdfEditorPanel() {
 }
 
 /* -------------------------------------------------------
-   PDF COVER + TEXT REPLACEMENT
+   PDF COVER REPLACEMENT
 ------------------------------------------------------- */
 
-function PdfCoverTextPanel() {
+function PdfCoverPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [cover, setCover] = useState<File | null>(null);
-  const [replacements, setReplacements] = useState<PdfTextReplacement[]>([
-    { find: "", replace: "" },
-  ]);
+  const [awardingBody, setAwardingBody] = useState("");
+  const [courseName, setCourseName] = useState("");
+  const [unitName, setUnitName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
 
-  const activeReplacements = useMemo(
-    () => replacements.filter((item) => item.find.trim()),
-    [replacements]
-  );
-
-  function updateReplacement(
-    index: number,
-    field: keyof PdfTextReplacement,
-    value: string
-  ) {
-    setReplacements((current) =>
-      current.map((item, itemIndex) =>
-        itemIndex === index ? { ...item, [field]: value } : item
-      )
-    );
-  }
-
-  function addReplacement() {
-    setReplacements((current) => [
-      ...current,
-      { find: "", replace: "" },
-    ]);
-  }
-
-  function removeReplacement(index: number) {
-    setReplacements((current) => {
-      const next = current.filter((_, itemIndex) => itemIndex !== index);
-      return next.length ? next : [{ find: "", replace: "" }];
-    });
-  }
+  const ready =
+    Boolean(file) &&
+    Boolean(cover) &&
+    Boolean(awardingBody.trim()) &&
+    Boolean(courseName.trim()) &&
+    Boolean(unitName.trim());
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-
-    if (!file || (!cover && activeReplacements.length === 0)) return;
+    if (!file || !cover || !ready) return;
 
     setBusy(true);
     setError("");
@@ -2307,26 +2277,20 @@ function PdfCoverTextPanel() {
     try {
       const form = new FormData();
       form.append("file", file);
-      form.append("replacements", JSON.stringify(activeReplacements));
+      form.append("cover", cover);
+      form.append("awarding_body", awardingBody.trim());
+      form.append("course_name", courseName.trim());
+      form.append("unit_name", unitName.trim());
 
-      if (cover) {
-        form.append("cover", cover);
-      }
-
-      const result = await apiRequest(
-        "/api/v1/pdf/replace-cover-text",
-        {
-          method: "POST",
-          body: form,
-        }
-      );
+      const result = await apiRequest("/api/v1/pdf/replace-cover", {
+        method: "POST",
+        body: form,
+      });
 
       setJob(result);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "PDF cover/text replacement failed."
+        err instanceof Error ? err.message : "PDF cover replacement failed."
       );
     } finally {
       setBusy(false);
@@ -2338,14 +2302,15 @@ function PdfCoverTextPanel() {
       <section className="hero compact">
         <div>
           <span className="eyebrow">SLC PDF Workflow</span>
-          <h2>Replace PDF Cover &amp; Text</h2>
+          <h2>Replace PDF Cover</h2>
           <p>
-            Replace the first page with a new cover and update exact text
-            anywhere in the PDF. Use either option on its own or both together.
+            Replace page 1 with a new cover image and add three centred text
+            rows: awarding body name, course name and unit name. All three use
+            the same medium text size. Pages 2 onward are kept unchanged.
           </p>
         </div>
 
-        <div className="hero-badge">REPLACE</div>
+        <div className="hero-badge">COVER</div>
       </section>
 
       <section className="card">
@@ -2373,102 +2338,84 @@ function PdfCoverTextPanel() {
         <div className="section-heading">
           <span>02</span>
           <div>
-            <h3>Replace cover page</h3>
+            <h3>Choose new cover image</h3>
             <p>
-              Optional. Upload a PDF, JPG, PNG or WebP. It will replace page 1
-              and be fitted to the original first-page size.
+              Upload the replacement cover. It is fitted to the original first
+              page size. JPG, PNG, WebP and single-page PDF covers are supported.
             </p>
           </div>
         </div>
 
         <FileField
-          label="New cover (optional)"
+          label="New cover image"
           accept=".pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
           onChange={(files) => {
             setCover(files[0] || null);
             setJob(null);
             setError("");
           }}
-          help={cover?.name || "PDF, JPG, PNG or WebP"}
+          help={cover?.name || "JPG, PNG, WebP or PDF"}
         />
-
-        {cover && (
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => setCover(null)}
-          >
-            Clear replacement cover
-          </button>
-        )}
       </section>
 
       <section className="card">
         <div className="section-heading">
           <span>03</span>
           <div>
-            <h3>Replace text</h3>
+            <h3>Cover text</h3>
             <p>
-              Optional. Enter exact text to find and the wording that should
-              replace it. Every matching occurrence will be updated.
+              These are placed as three centred rows using one shared medium
+              font size. If needed, all three shrink together so the sizes stay equal.
             </p>
           </div>
         </div>
 
-        <div className="replacement-list">
-          {replacements.map((item, index) => (
-            <div className="replacement-row" key={index}>
-              <label className="input-label replacement-input">
-                Find exact text
-                <input
-                  value={item.find}
-                  onChange={(event) =>
-                    updateReplacement(index, "find", event.target.value)
-                  }
-                  placeholder="e.g. Old Course Name"
-                />
-              </label>
+        <div className="cover-text-grid">
+          <label className="input-label">
+            Awarding Body Name
+            <input
+              value={awardingBody}
+              onChange={(event) => setAwardingBody(event.target.value)}
+              placeholder="e.g. Qualifi"
+              required
+            />
+          </label>
 
-              <label className="input-label replacement-input">
-                Replace with
-                <input
-                  value={item.replace}
-                  onChange={(event) =>
-                    updateReplacement(index, "replace", event.target.value)
-                  }
-                  placeholder="e.g. New Course Name"
-                />
-              </label>
+          <label className="input-label">
+            Course Name
+            <input
+              value={courseName}
+              onChange={(event) => setCourseName(event.target.value)}
+              placeholder="e.g. Level 5 Diploma in Business Management"
+              required
+            />
+          </label>
 
-              <button
-                type="button"
-                className="button secondary small replacement-remove"
-                onClick={() => removeReplacement(index)}
-                aria-label={`Remove replacement ${index + 1}`}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
+          <label className="input-label">
+            Unit Name
+            <input
+              value={unitName}
+              onChange={(event) => setUnitName(event.target.value)}
+              placeholder="e.g. Unit 3: Business Strategy"
+              required
+            />
+          </label>
         </div>
 
-        <button
-          type="button"
-          className="button secondary small"
-          onClick={addReplacement}
-        >
-          + Add another text replacement
-        </button>
+        <p className="cover-text-note">
+          Text style: centred, Garamond where available, white, same medium size
+          for all three rows.
+        </p>
       </section>
 
       {error && <div className="error-box">{error}</div>}
 
       <button
         className="button primary large"
-        disabled={!file || (!cover && activeReplacements.length === 0) || busy}
+        disabled={!ready || busy}
         type="submit"
       >
-        {busy ? "Updating PDF…" : "Replace cover / text"}
+        {busy ? "Updating cover…" : "Replace cover"}
       </button>
 
       {job && (
@@ -2480,24 +2427,14 @@ function PdfCoverTextPanel() {
                 <strong>{job.details?.cover_replaced ? "Yes" : "No"}</strong>
               </div>
               <div>
-                <span>Text matches changed</span>
-                <strong>{job.details?.text_matches ?? 0}</strong>
+                <span>Text size</span>
+                <strong>{job.details?.font_size ?? "—"} pt</strong>
               </div>
               <div>
                 <span>Pages</span>
                 <strong>{job.details?.pages ?? "—"}</strong>
               </div>
             </div>
-
-            {Array.isArray(job.details?.text_replacements) &&
-              job.details.text_replacements.some(
-                (item: Record<string, any>) => item.matches === 0
-              ) && (
-                <p className="replacement-note">
-                  One or more find values were not detected. The output was
-                  still created with all successful changes.
-                </p>
-              )}
           </section>
 
           <JobResult job={job} title="Updated PDF ready" />
@@ -2560,14 +2497,14 @@ export default function Home() {
             className={tab === "pdf-replace" ? "active" : ""}
             onClick={() => setTab("pdf-replace")}
           >
-            PDF Cover &amp; Text
+            Replace PDF Cover
           </button>
         </nav>
 
         {tab === "formatter" && <FormatterPanel />}
         {tab === "word-pdf" && <WordPdfPanel />}
         {tab === "pdf-editor" && <PdfEditorPanel />}
-        {tab === "pdf-replace" && <PdfCoverTextPanel />}
+        {tab === "pdf-replace" && <PdfCoverPanel />}
       </div>
     </main>
   );

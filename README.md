@@ -79,15 +79,15 @@ This was tested against the supplied `Unit 11.zip`: both the Assignment Brief an
 
 The existing PDF page-removal feature is exposed through FastAPI and the new frontend.
 
-### PDF Cover & Text
+### Replace PDF Cover
 
-A separate PDF workflow can now create a revised copy without changing the source file:
+A dedicated cover-only workflow can now create a revised PDF without changing the source file:
 
-- Replace page 1 with a PDF, JPG, PNG, or WebP cover.
-- Keep the original PDF page count and preserve all pages after the cover.
-- Apply one or more exact find/replace text changes across the PDF.
-- Preserve underlying images/vector artwork while replacing matched text.
-- Report how many text matches were changed and flag find values with no matches.
+- Replace page 1 with a PDF, JPG, PNG, or WebP cover image.
+- Add exactly three centred cover text rows: Awarding Body Name, Course Name and Unit Name.
+- Use one shared medium text size for all three rows. The shared size starts at 24 pt and all three reduce together only when required to fit the longest line.
+- Use bundled Garamond when available, with white text over a subtle translucent panel for readability.
+- Keep every page after the cover unchanged.
 
 ## Repository structure
 
@@ -217,7 +217,7 @@ POST /api/v1/jobs/{job_id}/update-toc
 POST /api/v1/jobs/{job_id}/convert-to-pdf
 POST /api/v1/pdf/page-count
 POST /api/v1/pdf/remove-pages
-POST /api/v1/pdf/replace-cover-text
+POST /api/v1/pdf/replace-cover
 GET  /api/v1/jobs/{job_id}
 GET  /api/v1/jobs/{job_id}/download
 GET  /api/v1/jobs/{job_id}/report
@@ -230,7 +230,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **77 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover/text replacement, and Word-to-PDF conversion.
+The backend currently has **84 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
 
 ## Next implementation step
 
