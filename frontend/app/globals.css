@@ -976,6 +976,43 @@ a {
 }
 
 /* -------------------------------------------------------
+   PDF COVER + TEXT REPLACEMENT
+------------------------------------------------------- */
+
+.replacement-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.replacement-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(5, 17, 31, 0.3);
+}
+
+.replacement-input {
+  margin-top: 0;
+}
+
+.replacement-remove {
+  margin-bottom: 1px;
+}
+
+.replacement-note {
+  margin: 14px 0 0;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* -------------------------------------------------------
    MOBILE
 ------------------------------------------------------- */
 
@@ -1054,6 +1091,14 @@ a {
     min-height: 105px;
 
     padding: 14px;
+  }
+
+  .replacement-row {
+    grid-template-columns: 1fr;
+  }
+
+  .replacement-remove {
+    width: 100%;
   }
 }
 

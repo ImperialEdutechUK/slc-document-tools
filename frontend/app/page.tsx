@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 
-type Tab = "formatter" | "word-pdf" | "pdf-editor";
+type Tab = "formatter" | "word-pdf" | "pdf-editor" | "pdf-replace";
 
 type JobResponse = {
   id: string;
@@ -57,6 +57,11 @@ type FooterSettings = {
   page_offset: number;
   course_offset: number;
   copyright_offset: number;
+};
+
+type PdfTextReplacement = {
+  find: string;
+  replace: string;
 };
 
 const API_BASE = (
@@ -2246,6 +2251,263 @@ function PdfEditorPanel() {
 }
 
 /* -------------------------------------------------------
+   PDF COVER + TEXT REPLACEMENT
+------------------------------------------------------- */
+
+function PdfCoverTextPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [cover, setCover] = useState<File | null>(null);
+  const [replacements, setReplacements] = useState<PdfTextReplacement[]>([
+    { find: "", replace: "" },
+  ]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  const activeReplacements = useMemo(
+    () => replacements.filter((item) => item.find.trim()),
+    [replacements]
+  );
+
+  function updateReplacement(
+    index: number,
+    field: keyof PdfTextReplacement,
+    value: string
+  ) {
+    setReplacements((current) =>
+      current.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item
+      )
+    );
+  }
+
+  function addReplacement() {
+    setReplacements((current) => [
+      ...current,
+      { find: "", replace: "" },
+    ]);
+  }
+
+  function removeReplacement(index: number) {
+    setReplacements((current) => {
+      const next = current.filter((_, itemIndex) => itemIndex !== index);
+      return next.length ? next : [{ find: "", replace: "" }];
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+
+    if (!file || (!cover && activeReplacements.length === 0)) return;
+
+    setBusy(true);
+    setError("");
+    setJob(null);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("replacements", JSON.stringify(activeReplacements));
+
+      if (cover) {
+        form.append("cover", cover);
+      }
+
+      const result = await apiRequest(
+        "/api/v1/pdf/replace-cover-text",
+        {
+          method: "POST",
+          body: form,
+        }
+      );
+
+      setJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "PDF cover/text replacement failed."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="panel-stack">
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">SLC PDF Workflow</span>
+          <h2>Replace PDF Cover &amp; Text</h2>
+          <p>
+            Replace the first page with a new cover and update exact text
+            anywhere in the PDF. Use either option on its own or both together.
+          </p>
+        </div>
+
+        <div className="hero-badge">REPLACE</div>
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>01</span>
+          <div>
+            <h3>Choose source PDF</h3>
+            <p>The uploaded original is never overwritten.</p>
+          </div>
+        </div>
+
+        <FileField
+          label="Source PDF"
+          accept=".pdf"
+          onChange={(files) => {
+            setFile(files[0] || null);
+            setJob(null);
+            setError("");
+          }}
+          help={file?.name || "PDF only"}
+        />
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>02</span>
+          <div>
+            <h3>Replace cover page</h3>
+            <p>
+              Optional. Upload a PDF, JPG, PNG or WebP. It will replace page 1
+              and be fitted to the original first-page size.
+            </p>
+          </div>
+        </div>
+
+        <FileField
+          label="New cover (optional)"
+          accept=".pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+          onChange={(files) => {
+            setCover(files[0] || null);
+            setJob(null);
+            setError("");
+          }}
+          help={cover?.name || "PDF, JPG, PNG or WebP"}
+        />
+
+        {cover && (
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => setCover(null)}
+          >
+            Clear replacement cover
+          </button>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>03</span>
+          <div>
+            <h3>Replace text</h3>
+            <p>
+              Optional. Enter exact text to find and the wording that should
+              replace it. Every matching occurrence will be updated.
+            </p>
+          </div>
+        </div>
+
+        <div className="replacement-list">
+          {replacements.map((item, index) => (
+            <div className="replacement-row" key={index}>
+              <label className="input-label replacement-input">
+                Find exact text
+                <input
+                  value={item.find}
+                  onChange={(event) =>
+                    updateReplacement(index, "find", event.target.value)
+                  }
+                  placeholder="e.g. Old Course Name"
+                />
+              </label>
+
+              <label className="input-label replacement-input">
+                Replace with
+                <input
+                  value={item.replace}
+                  onChange={(event) =>
+                    updateReplacement(index, "replace", event.target.value)
+                  }
+                  placeholder="e.g. New Course Name"
+                />
+              </label>
+
+              <button
+                type="button"
+                className="button secondary small replacement-remove"
+                onClick={() => removeReplacement(index)}
+                aria-label={`Remove replacement ${index + 1}`}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          className="button secondary small"
+          onClick={addReplacement}
+        >
+          + Add another text replacement
+        </button>
+      </section>
+
+      {error && <div className="error-box">{error}</div>}
+
+      <button
+        className="button primary large"
+        disabled={!file || (!cover && activeReplacements.length === 0) || busy}
+        type="submit"
+      >
+        {busy ? "Updating PDF…" : "Replace cover / text"}
+      </button>
+
+      {job && (
+        <>
+          <section className="card compact-card">
+            <div className="summary-row">
+              <div>
+                <span>Cover replaced</span>
+                <strong>{job.details?.cover_replaced ? "Yes" : "No"}</strong>
+              </div>
+              <div>
+                <span>Text matches changed</span>
+                <strong>{job.details?.text_matches ?? 0}</strong>
+              </div>
+              <div>
+                <span>Pages</span>
+                <strong>{job.details?.pages ?? "—"}</strong>
+              </div>
+            </div>
+
+            {Array.isArray(job.details?.text_replacements) &&
+              job.details.text_replacements.some(
+                (item: Record<string, any>) => item.matches === 0
+              ) && (
+                <p className="replacement-note">
+                  One or more find values were not detected. The output was
+                  still created with all successful changes.
+                </p>
+              )}
+          </section>
+
+          <JobResult job={job} title="Updated PDF ready" />
+        </>
+      )}
+    </form>
+  );
+}
+
+/* -------------------------------------------------------
    MAIN APP
 ------------------------------------------------------- */
 
@@ -2292,11 +2554,20 @@ export default function Home() {
           >
             PDF Editor
           </button>
+
+          <button
+            type="button"
+            className={tab === "pdf-replace" ? "active" : ""}
+            onClick={() => setTab("pdf-replace")}
+          >
+            PDF Cover &amp; Text
+          </button>
         </nav>
 
         {tab === "formatter" && <FormatterPanel />}
         {tab === "word-pdf" && <WordPdfPanel />}
         {tab === "pdf-editor" && <PdfEditorPanel />}
+        {tab === "pdf-replace" && <PdfCoverTextPanel />}
       </div>
     </main>
   );

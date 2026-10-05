@@ -458,39 +458,8 @@ def _download_stock_resource(url: str) -> bytes:
         except Exception as exc:
             errors.append(f"account fallback: {exc}")
 
-    raise ValueError(_summarize_download_failure(errors))
-
-
-def _summarize_download_failure(errors: list[str]) -> str:
-    """Turn the internal error trail into one actionable sentence.
-
-    The full chain (URLs, HTTP codes, selector failures) is still appended in
-    parentheses for debugging, but a billing problem with the Magnific/Freepik
-    API key should read as a billing problem to whoever is using the tool, not
-    as a wall of raw technical errors.
-    """
-    joined = " ".join(errors)
     detail = "; ".join(errors[-10:]) if errors else "no downloadable raster URL was returned"
-
-    if "402" in joined or "Payment Required" in joined:
-        return (
-            "Magnific/Freepik declined the download because payment is required "
-            "(HTTP 402). The configured MAGNIFIC_API_KEY has no available "
-            "download credits, or its plan has lapsed - check the plan/billing "
-            f"on the Freepik/Magnific developer dashboard. ({detail})"
-        )
-    if any(
-        marker in joined
-        for marker in ("verification/2FA", "bot-protection", "email field was not found")
-    ):
-        return (
-            "The stock image could not be downloaded, and the automated "
-            "account fallback could not get past Magnific's sign-in page (it "
-            "may be showing a CAPTCHA, verification step, or a changed login "
-            "screen that a headless browser can't complete). Capture a fresh "
-            f"session with scripts/capture_freepik_session.py instead. ({detail})"
-        )
-    return f"The stock image could not be downloaded ({detail})."
+    raise ValueError(f"The stock image could not be downloaded ({detail}).")
 
 
 def _verify_image(payload: bytes) -> None:

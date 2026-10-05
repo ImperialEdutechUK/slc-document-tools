@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import Iterable
 
+import pymupdf as fitz
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
 
@@ -91,6 +94,314 @@ def remove_pdf_pages(pdf_bytes: bytes, pages_to_remove: Iterable[int]) -> bytes:
     output = BytesIO()
     writer.write(output)
     return output.getvalue()
+
+
+def _cover_page_from_upload(cover_bytes: bytes, filename: str | None):
+    """Return the first page of an uploaded PDF/image as a pypdf PageObject."""
+    if not cover_bytes:
+        raise PdfEditingError("The replacement cover file is empty.")
+
+    suffix = Path(filename or "").suffix.lower()
+
+    if suffix == ".pdf":
+        cover_reader = _read_pdf(cover_bytes)
+        return cover_reader.pages[0]
+
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise PdfEditingError("The replacement cover must be a PDF, JPG, PNG, or WebP file.")
+
+    try:
+        with Image.open(BytesIO(cover_bytes)) as image:
+            converted = image.convert("RGB")
+            image_pdf = BytesIO()
+            converted.save(image_pdf, format="PDF", resolution=72.0)
+    except Exception as exc:
+        raise PdfEditingError("The replacement cover image could not be read.") from exc
+
+    return _read_pdf(image_pdf.getvalue()).pages[0]
+
+
+def replace_pdf_cover(
+    pdf_bytes: bytes,
+    cover_bytes: bytes,
+    cover_filename: str | None,
+) -> bytes:
+    """Replace page 1 with the supplied PDF/image cover and keep all other pages."""
+    reader = _read_pdf(pdf_bytes)
+    replacement = _cover_page_from_upload(cover_bytes, cover_filename)
+
+    target_width = float(reader.pages[0].mediabox.width)
+    target_height = float(reader.pages[0].mediabox.height)
+
+    try:
+        replacement.scale_to(target_width, target_height)
+    except Exception as exc:
+        raise PdfEditingError("The replacement cover could not be resized to the original page size.") from exc
+
+    writer = PdfWriter()
+    writer.add_page(replacement)
+    for page in reader.pages[1:]:
+        writer.add_page(page)
+
+    _copy_metadata(reader, writer)
+
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _span_style_for_rect(page: fitz.Page, rect: fitz.Rect) -> dict:
+    """Pick the text style of the span that overlaps a searched text rectangle."""
+    best: dict | None = None
+    best_area = 0.0
+
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        blocks = []
+
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                try:
+                    span_rect = fitz.Rect(span.get("bbox"))
+                    overlap = span_rect & rect
+                    area = max(0.0, overlap.width) * max(0.0, overlap.height)
+                except Exception:
+                    continue
+                if area > best_area:
+                    best = span
+                    best_area = area
+
+    if not best:
+        return {"size": 11.0, "color": (0.0, 0.0, 0.0), "font": ""}
+
+    raw_color = int(best.get("color", 0) or 0)
+    rgb = (
+        ((raw_color >> 16) & 255) / 255.0,
+        ((raw_color >> 8) & 255) / 255.0,
+        (raw_color & 255) / 255.0,
+    )
+    return {
+        "size": max(5.0, float(best.get("size", 11.0) or 11.0)),
+        "color": rgb,
+        "font": str(best.get("font", "") or ""),
+    }
+
+
+def _garamond_fontfile(existing_font: str) -> str | None:
+    """Use the bundled Garamond family when available, matching basic style."""
+    fonts_dir = Path(__file__).resolve().parents[2] / "fonts"
+    existing_lower = existing_font.lower()
+
+    if "garamond" not in existing_lower:
+        return None
+
+    candidates: list[str]
+    if "bold" in existing_lower:
+        candidates = ["GARABD.TTF", "GARA.TTF"]
+    elif "italic" in existing_lower or "oblique" in existing_lower:
+        candidates = ["GARAIT.TTF", "GARA.TTF"]
+    else:
+        candidates = ["GARA.TTF"]
+
+    for filename in candidates:
+        path = fonts_dir / filename
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _builtin_pdf_font(existing_font: str) -> str:
+    """Map common embedded PDF font names to PyMuPDF's Base-14 aliases."""
+    name = existing_font.lower()
+    bold = "bold" in name
+    italic = "italic" in name or "oblique" in name
+
+    if "times" in name:
+        if bold and italic:
+            return "tibi"
+        if bold:
+            return "tibo"
+        if italic:
+            return "tiit"
+        return "tiro"
+
+    if "courier" in name:
+        if bold and italic:
+            return "cobi"
+        if bold:
+            return "cobo"
+        if italic:
+            return "coit"
+        return "cour"
+
+    if bold and italic:
+        return "hebi"
+    if bold:
+        return "hebo"
+    if italic:
+        return "heit"
+    return "helv"
+
+
+def replace_pdf_text(
+    pdf_bytes: bytes,
+    replacements: Iterable[tuple[str, str]],
+) -> tuple[bytes, list[dict]]:
+    """
+    Replace exact visible text matches while preserving the page artwork.
+
+    Text is removed with text-only redaction so images and vector backgrounds are
+    retained. Replacement text is drawn into the same bounding box using the
+    detected size/colour and the bundled Garamond family when available.
+    """
+    pairs: list[tuple[str, str]] = []
+    for find_text, replace_text in replacements:
+        find_text = str(find_text or "")
+        replace_text = str(replace_text or "")
+        if not find_text.strip():
+            continue
+        pairs.append((find_text, replace_text))
+
+    if not pairs:
+        raise PdfEditingError("Add at least one non-empty text value to find.")
+    if len(pairs) > 50:
+        raise PdfEditingError("A maximum of 50 text replacements can be applied at once.")
+
+    try:
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:
+        raise PdfEditingError("The uploaded file is not a readable PDF.") from exc
+
+    if document.is_encrypted:
+        document.close()
+        raise PdfEditingError(
+            "Password-protected PDFs are not supported. Remove the password and upload the file again."
+        )
+
+    report: list[dict] = []
+
+    try:
+        for find_text, replace_text in pairs:
+            count = 0
+
+            for page in document:
+                matches = page.search_for(find_text)
+                if not matches:
+                    continue
+
+                pending: list[tuple[fitz.Rect, dict]] = []
+                for match in matches:
+                    rect = fitz.Rect(match)
+                    pending.append((rect, _span_style_for_rect(page, rect)))
+                    page.add_redact_annot(rect, fill=None, cross_out=False)
+
+                # Remove text only. Preserve images and vector graphics beneath it.
+                page.apply_redactions(images=0, graphics=0, text=0)
+
+                for rect, style in pending:
+                    if replace_text:
+                        fontfile = _garamond_fontfile(style["font"])
+                        fontname = (
+                            "slc_garamond"
+                            if fontfile
+                            else _builtin_pdf_font(style["font"])
+                        )
+                        fontsize = float(style["size"])
+
+                        # Give the replacement a little vertical breathing room but
+                        # keep it within the original text area to avoid collisions.
+                        text_rect = fitz.Rect(
+                            rect.x0,
+                            max(page.rect.y0, rect.y0 - 1.5),
+                            rect.x1,
+                            min(page.rect.y1, rect.y1 + 2.5),
+                        )
+
+                        # If the new text is wider, shrink it gradually so the page
+                        # layout is not pushed into neighbouring content.
+                        test_font = None
+                        try:
+                            if fontfile:
+                                test_font = fitz.Font(fontfile=fontfile)
+                            else:
+                                test_font = fitz.Font(fontname)
+                            width = test_font.text_length(replace_text, fontsize=fontsize)
+                            if width > text_rect.width and width > 0:
+                                fontsize = max(5.0, fontsize * (text_rect.width / width) * 0.96)
+                        except Exception:
+                            pass
+
+                        remaining = page.insert_textbox(
+                            text_rect,
+                            replace_text,
+                            fontname=fontname,
+                            fontfile=fontfile,
+                            fontsize=fontsize,
+                            color=style["color"],
+                            align=0,
+                            overlay=True,
+                        )
+
+                        # A negative return means the text did not fit. Retry once
+                        # with the minimum practical size before leaving it blank.
+                        if remaining < 0 and fontsize > 5.0:
+                            page.insert_textbox(
+                                text_rect,
+                                replace_text,
+                                fontname=fontname,
+                                fontfile=fontfile,
+                                fontsize=5.0,
+                                color=style["color"],
+                                align=0,
+                                overlay=True,
+                            )
+
+                    count += 1
+
+            report.append({"find": find_text, "replace": replace_text, "matches": count})
+
+        output = document.tobytes(garbage=4, deflate=True)
+    except Exception as exc:
+        raise PdfEditingError("The PDF text could not be replaced safely.") from exc
+    finally:
+        document.close()
+
+    return output, report
+
+
+def replace_pdf_cover_and_text(
+    pdf_bytes: bytes,
+    *,
+    cover_bytes: bytes | None = None,
+    cover_filename: str | None = None,
+    replacements: Iterable[tuple[str, str]] | None = None,
+) -> tuple[bytes, dict]:
+    """Apply an optional cover replacement and optional text replacements."""
+    _read_pdf(pdf_bytes)
+
+    updated = pdf_bytes
+    cover_replaced = False
+    replacement_report: list[dict] = []
+
+    if cover_bytes is not None:
+        updated = replace_pdf_cover(updated, cover_bytes, cover_filename)
+        cover_replaced = True
+
+    pairs = list(replacements or [])
+    if pairs:
+        updated, replacement_report = replace_pdf_text(updated, pairs)
+
+    if not cover_replaced and not pairs:
+        raise PdfEditingError("Upload a replacement cover or add at least one text replacement.")
+
+    return updated, {
+        "cover_replaced": cover_replaced,
+        "text_replacements": replacement_report,
+        "text_matches": sum(item["matches"] for item in replacement_report),
+        "pages": get_pdf_page_count(updated),
+    }
 
 
 def _page_has_meaningful_text(page) -> bool:
