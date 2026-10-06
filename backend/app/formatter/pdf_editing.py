@@ -496,10 +496,25 @@ def replace_pdf_cover_with_three_lines(
         fontsize = max(minimum_fontsize, fontsize)
 
         # Keep the complete three-line block comfortably inside the coloured
-        # band as well as within the horizontal safe area.
-        line_height_factor = 1.25
-        max_vertical_fontsize = band_height / (3.0 * line_height_factor)
-        fontsize = min(fontsize, max_vertical_fontsize)
+        # band as well as within the horizontal safe area. Use generous
+        # vertical spacing so the awarding body, course name and unit name
+        # read as three clearly separated lines, matching the reference cover.
+        #
+        # Preserve the selected text size whenever possible. On unusually
+        # shallow caption bands, reduce only the line spacing first; shrink the
+        # text only if even the minimum safe spacing cannot fit.
+        desired_line_height_factor = 1.85
+        minimum_line_height_factor = 1.25
+        available_line_height_factor = band_height / (3.0 * fontsize)
+        line_height_factor = min(
+            desired_line_height_factor,
+            available_line_height_factor,
+        )
+
+        if line_height_factor < minimum_line_height_factor:
+            max_vertical_fontsize = band_height / (3.0 * minimum_line_height_factor)
+            fontsize = min(fontsize, max_vertical_fontsize)
+            line_height_factor = minimum_line_height_factor
 
         # If a line is exceptionally long, keep reducing slightly below the
         # normal minimum rather than failing with a misleading textbox error.
@@ -563,6 +578,7 @@ def replace_pdf_cover_with_three_lines(
         "course_name": values[1],
         "unit_name": values[2],
         "font_size": round(fontsize, 1),
+        "line_spacing_factor": line_height_factor,
         "text_band_top_fraction": round(band_top_fraction, 4),
         "text_alignment": "left",
         "pages": get_pdf_page_count(result),
