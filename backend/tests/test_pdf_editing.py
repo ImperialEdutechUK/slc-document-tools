@@ -116,11 +116,11 @@ class PdfEditingTests(unittest.TestCase):
         document.close()
 
         self.assertIn("Qualifi", first_page_text)
-        self.assertIn("Level 5 Diploma in Business Management", first_page_text)
+        self.assertIn("Level 5 Diploma in Business", first_page_text)
+        self.assertIn("Management", first_page_text)
         self.assertIn("Unit 3: Business Strategy", first_page_text)
         self.assertEqual(details["pages"], 3)
-        self.assertGreaterEqual(details["font_size"], 12.0)
-        self.assertLessEqual(details["font_size"], 24.0)
+        self.assertEqual(details["font_size"], 18.0)
 
     def test_three_line_cover_accepts_short_text_without_false_too_long_error(self):
         image_buffer = BytesIO()
@@ -140,9 +140,10 @@ class PdfEditingTests(unittest.TestCase):
         document.close()
 
         self.assertEqual(first_page_text.count("test"), 3)
-        self.assertEqual(details["font_size"], 24.0)
+        self.assertEqual(details["font_size"], 18.0)
+        self.assertEqual(details["wrapped_line_counts"], [1, 1, 1])
 
-    def test_three_line_cover_shrinks_all_lines_together_for_long_course_name(self):
+    def test_three_line_cover_wraps_long_course_name_without_shrinking_font(self):
         image_buffer = BytesIO()
         Image.new("RGB", (1200, 1600), (30, 90, 120)).save(image_buffer, format="PNG")
         long_course = "Level 5 Extended Diploma in Business Management and Strategic Leadership"
@@ -160,9 +161,10 @@ class PdfEditingTests(unittest.TestCase):
         first_page_text = document[0].get_text()
         document.close()
 
-        self.assertIn(long_course, first_page_text)
-        self.assertLess(details["font_size"], 24.0)
-        self.assertGreaterEqual(details["font_size"], 5.0)
+        self.assertIn("Level 5 Extended Diploma", first_page_text)
+        self.assertIn("Strategic Leadership", first_page_text)
+        self.assertEqual(details["font_size"], 18.0)
+        self.assertGreater(details["wrapped_line_counts"][1], 1)
 
     def test_three_line_cover_text_is_placed_inside_lower_teal_band(self):
         image = Image.new("RGB", (1200, 1600), (220, 220, 220))

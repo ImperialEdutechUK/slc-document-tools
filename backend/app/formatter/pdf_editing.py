@@ -98,6 +98,56 @@ def remove_pdf_pages(pdf_bytes: bytes, pages_to_remove: Iterable[int]) -> bytes:
     return output.getvalue()
 
 
+def _wrap_text_to_width(text: str, font: fitz.Font, fontsize: float, max_width: float) -> list[str]:
+    """Wrap text into lines that fit the given width at a fixed font size.
+
+    Wrapping is greedy by words so long course or unit names stay at the
+    required font size instead of shrinking to fit on one line. Exceptionally
+    long single words are split character-by-character as a last resort.
+    """
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return [""]
+
+    words = cleaned.split(" ")
+    lines: list[str] = []
+    current = ""
+
+    def _split_long_token(token: str) -> list[str]:
+        pieces: list[str] = []
+        piece = ""
+        for char in token:
+            candidate = piece + char
+            if not piece or font.text_length(candidate, fontsize=fontsize) <= max_width:
+                piece = candidate
+            else:
+                pieces.append(piece)
+                piece = char
+        if piece:
+            pieces.append(piece)
+        return pieces or [token]
+
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if not current or font.text_length(candidate, fontsize=fontsize) <= max_width:
+            current = candidate
+            continue
+
+        lines.append(current)
+        if font.text_length(word, fontsize=fontsize) <= max_width:
+            current = word
+            continue
+
+        split_pieces = _split_long_token(word)
+        lines.extend(split_pieces[:-1])
+        current = split_pieces[-1]
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
 def _cover_page_from_upload(cover_bytes: bytes, filename: str | None):
     """Return the first page of an uploaded PDF/image as a pypdf PageObject."""
     if not cover_bytes:
@@ -382,12 +432,12 @@ def replace_pdf_cover_with_three_lines(
     course_name: str,
     unit_name: str,
 ) -> tuple[bytes, dict]:
-    """Replace page 1 and place three equal-size text lines in the teal band.
+    """Replace page 1 and place three fixed-size text groups in the teal band.
 
-    The three values always use the same font size. The shared size starts at
-    24 pt and, when needed, is reduced for all three lines together so the
-    longest line fits safely within the page. The text is left-aligned inside
-    the lower SLC teal/green cover band, matching the reference cover style.
+    The awarding body, course name and unit name all use a fixed 18 pt size.
+    When a value is too long for one line, it is wrapped onto the next line
+    instead of shrinking the font. The text remains left-aligned inside the
+    lower SLC teal/green cover band, matching the supplied reference cover.
     Pages 2 onward are copied unchanged from the source PDF.
     """
     _read_pdf(pdf_bytes)
@@ -481,80 +531,69 @@ def replace_pdf_cover_with_three_lines(
         right_margin = page_rect.width * 0.08
         safe_width = page_rect.width - left_margin - right_margin
 
-        # Use one shared medium text size. Work out the exact largest size
-        # that allows the widest of the three values to stay on ONE line.
-        maximum_fontsize = 24.0
-        minimum_fontsize = 8.0
+        # Keep all three values at a consistent 18 pt size. Long values wrap
+        # to additional lines instead of shrinking.
+        fontsize = 18.0
+        wrapped_groups = [
+            _wrap_text_to_width(value, font, fontsize, safe_width)
+            for value in values
+        ]
 
-        widest_at_one_point = max(
-            font.text_length(value, fontsize=1.0) for value in values
-        )
-        if widest_at_one_point <= 0:
-            raise PdfEditingError("The cover text could not be measured safely.")
-
-        fontsize = min(maximum_fontsize, safe_width / widest_at_one_point)
-        fontsize = max(minimum_fontsize, fontsize)
-
-        # Keep the complete three-line block comfortably inside the coloured
-        # band as well as within the horizontal safe area. Use generous
-        # vertical spacing so the awarding body, course name and unit name
-        # read as three clearly separated lines, matching the reference cover.
-        #
-        # Preserve the selected text size whenever possible. On unusually
-        # shallow caption bands, reduce only the line spacing first; shrink the
-        # text only if even the minimum safe spacing cannot fit.
-        desired_line_height_factor = 1.85
-        minimum_line_height_factor = 1.25
-        available_line_height_factor = band_height / (3.0 * fontsize)
-        line_height_factor = min(
-            desired_line_height_factor,
-            available_line_height_factor,
-        )
-
-        if line_height_factor < minimum_line_height_factor:
-            max_vertical_fontsize = band_height / (3.0 * minimum_line_height_factor)
-            fontsize = min(fontsize, max_vertical_fontsize)
-            line_height_factor = minimum_line_height_factor
-
-        # If a line is exceptionally long, keep reducing slightly below the
-        # normal minimum rather than failing with a misleading textbox error.
-        # A hard floor prevents unreadable output for pathological input.
-        hard_floor = 5.0
-        while (
-            max(font.text_length(value, fontsize=fontsize) for value in values)
-            > safe_width
-            and fontsize > hard_floor
-        ):
-            fontsize -= 0.25
-
-        widest = max(font.text_length(value, fontsize=fontsize) for value in values)
-        if widest > safe_width + 0.1:
-            raise PdfEditingError(
-                "One of the cover text values is too long to fit safely on the cover. "
-                "Please shorten that value."
-            )
+        line_height_factor = 1.15
+        min_line_height_factor = 0.9
+        group_gap_factor = 0.7
+        min_group_gap_factor = 0.0
 
         line_height = fontsize * line_height_factor
-        block_height = line_height * 3
-        top = band_top + max(0.0, (band_height - block_height) / 2.0)
+        group_gap = fontsize * group_gap_factor
+
+        total_line_count = sum(len(group) for group in wrapped_groups)
+        if total_line_count <= 0:
+            raise PdfEditingError("The cover text could not be measured safely.")
+
+        total_height = (total_line_count * line_height) + ((len(wrapped_groups) - 1) * group_gap)
+
+        while total_height > band_height and group_gap_factor > min_group_gap_factor:
+            group_gap_factor = max(min_group_gap_factor, group_gap_factor - 0.05)
+            group_gap = fontsize * group_gap_factor
+            total_height = (total_line_count * line_height) + ((len(wrapped_groups) - 1) * group_gap)
+
+        while total_height > band_height and line_height_factor > min_line_height_factor:
+            line_height_factor = max(min_line_height_factor, line_height_factor - 0.05)
+            line_height = fontsize * line_height_factor
+            total_height = (total_line_count * line_height) + ((len(wrapped_groups) - 1) * group_gap)
+
+        if total_height > band_height + 0.1:
+            raise PdfEditingError(
+                "The cover text is too long to fit safely at 18 pt. "
+                "Please shorten the course or unit name."
+            )
+
+        top = band_top + max(0.0, (band_height - total_height) / 2.0)
 
         # Font metrics are expressed relative to the font size. Using them to
-        # calculate the baseline centres every line vertically within its row.
+        # calculate the baseline centres every wrapped line vertically within
+        # its row keeps the text visually balanced in the coloured band.
         ascender = float(getattr(font, "ascender", 0.9))
         descender = float(getattr(font, "descender", -0.2))
 
-        for index, value in enumerate(values):
-            row_center_y = top + (index + 0.5) * line_height
-            baseline_y = row_center_y + ((ascender + descender) * fontsize / 2.0)
+        cursor_y = top
+        for group_index, group_lines in enumerate(wrapped_groups):
+            for line in group_lines:
+                row_center_y = cursor_y + (line_height / 2.0)
+                baseline_y = row_center_y + ((ascender + descender) * fontsize / 2.0)
+                cover_page.insert_text(
+                    fitz.Point(left_margin, baseline_y),
+                    line,
+                    fontname=font_name,
+                    fontsize=fontsize,
+                    color=(1, 1, 1),
+                    overlay=True,
+                )
+                cursor_y += line_height
 
-            cover_page.insert_text(
-                fitz.Point(left_margin, baseline_y),
-                value,
-                fontname=font_name,
-                fontsize=fontsize,
-                color=(1, 1, 1),
-                overlay=True,
-            )
+            if group_index < len(wrapped_groups) - 1:
+                cursor_y += group_gap
 
         if source.page_count > 1:
             output.insert_pdf(source, from_page=1, to_page=source.page_count - 1)
@@ -578,7 +617,9 @@ def replace_pdf_cover_with_three_lines(
         "course_name": values[1],
         "unit_name": values[2],
         "font_size": round(fontsize, 1),
-        "line_spacing_factor": line_height_factor,
+        "line_spacing_factor": round(line_height_factor, 2),
+        "group_spacing_factor": round(group_gap_factor, 2),
+        "wrapped_line_counts": [len(group) for group in wrapped_groups],
         "text_band_top_fraction": round(band_top_fraction, 4),
         "text_alignment": "left",
         "pages": get_pdf_page_count(result),
