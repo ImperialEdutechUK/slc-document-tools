@@ -2304,9 +2304,10 @@ function PdfCoverPanel() {
           <span className="eyebrow">SLC PDF Workflow</span>
           <h2>Replace PDF Cover</h2>
           <p>
-            Replace page 1 with a new cover image and add three centred text
-            rows: awarding body name, course name and unit name. All three use
-            the same medium text size. Pages 2 onward are kept unchanged.
+            Replace page 1 with a new cover image and add three text rows
+            inside the lower teal/green cover band, matching the SLC cover
+            style. All three use the same medium text size. Pages 2 onward are
+            kept unchanged.
           </p>
         </div>
 
@@ -2364,8 +2365,9 @@ function PdfCoverPanel() {
           <div>
             <h3>Cover text</h3>
             <p>
-              These are placed as three centred rows using one shared medium
-              font size. If needed, all three shrink together so the sizes stay equal.
+              These are placed as three left-aligned rows inside the lower
+              teal/green cover band using one shared medium font size. If needed,
+              all three shrink together so the sizes stay equal.
             </p>
           </div>
         </div>
@@ -2415,8 +2417,8 @@ function PdfCoverPanel() {
         </div>
 
         <p className="cover-text-note">
-          Text style: centred, Garamond where available, white, same medium size
-          for all three rows.
+          Text style: left-aligned inside the teal/green band, Garamond where
+          available, white, same medium size for all three rows.
         </p>
       </section>
 

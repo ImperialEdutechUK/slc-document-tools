@@ -164,6 +164,41 @@ class PdfEditingTests(unittest.TestCase):
         self.assertLess(details["font_size"], 24.0)
         self.assertGreaterEqual(details["font_size"], 5.0)
 
+    def test_three_line_cover_text_is_placed_inside_lower_teal_band(self):
+        image = Image.new("RGB", (1200, 1600), (220, 220, 220))
+        # Match the SLC cover structure: photo/artwork above, solid teal band below.
+        for y in range(1200, 1600):
+            for x in range(1200):
+                image.putpixel((x, y), (2, 153, 160))
+        image_buffer = BytesIO()
+        image.save(image_buffer, format="PNG")
+
+        result, details = replace_pdf_cover_with_three_lines(
+            make_pdf(2),
+            image_buffer.getvalue(),
+            "cover.png",
+            "NCFE CACHE",
+            "Level 5 Diploma",
+            "Unit 8",
+        )
+
+        document = fitz.open(stream=result, filetype="pdf")
+        spans = [
+            span
+            for block in document[0].get_text("dict")["blocks"]
+            if "lines" in block
+            for line in block["lines"]
+            for span in line["spans"]
+            if span["text"] in {"NCFE CACHE", "Level 5 Diploma", "Unit 8"}
+        ]
+        document.close()
+
+        self.assertEqual(len(spans), 3)
+        # Source test page is 400 pt high; the teal band starts at 75% = 300 pt.
+        self.assertTrue(all(span["bbox"][1] >= 300 for span in spans))
+        self.assertAlmostEqual(details["text_band_top_fraction"], 0.75, places=2)
+        self.assertEqual(details["text_alignment"], "left")
+
     def test_three_line_cover_requires_all_text_fields(self):
         image_buffer = BytesIO()
         Image.new("RGB", (600, 800), (30, 90, 120)).save(image_buffer, format="PNG")

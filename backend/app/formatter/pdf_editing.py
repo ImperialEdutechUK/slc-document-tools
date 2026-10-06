@@ -10,6 +10,8 @@ import pymupdf as fitz
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from .cover_layout import detect_teal_band_top_fraction
+
 
 class PdfEditingError(ValueError):
     """Raised when a PDF cannot be safely processed."""
@@ -380,12 +382,13 @@ def replace_pdf_cover_with_three_lines(
     course_name: str,
     unit_name: str,
 ) -> tuple[bytes, dict]:
-    """Replace page 1 with an image/PDF cover and add three equal-size centred text lines.
+    """Replace page 1 and place three equal-size text lines in the teal band.
 
     The three values always use the same font size. The shared size starts at
     24 pt and, when needed, is reduced for all three lines together so the
-    longest line fits safely within the page. Pages 2 onward are copied
-    unchanged from the source PDF.
+    longest line fits safely within the page. The text is left-aligned inside
+    the lower SLC teal/green cover band, matching the reference cover style.
+    Pages 2 onward are copied unchanged from the source PDF.
     """
     _read_pdf(pdf_bytes)
 
@@ -418,11 +421,21 @@ def replace_pdf_cover_with_three_lines(
         cover_page = output.new_page(width=page_rect.width, height=page_rect.height)
         full_rect = fitz.Rect(0, 0, page_rect.width, page_rect.height)
 
+        # Keep a raster copy of the replacement artwork so we can detect the
+        # SLC teal/green caption band and place the three text lines inside it.
+        cover_image_for_band_detection = None
+
         if suffix == ".pdf":
             cover_doc = fitz.open(stream=cover_bytes, filetype="pdf")
             if cover_doc.page_count < 1:
                 raise PdfEditingError("The replacement cover PDF does not contain a page.")
             cover_page.show_pdf_page(full_rect, cover_doc, 0, keep_proportion=False)
+
+            # Render the first cover page only for band detection. The actual
+            # PDF artwork is still inserted vector-for-vector above.
+            detect_page = cover_doc[0]
+            detect_pixmap = detect_page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            cover_image_for_band_detection = detect_pixmap.tobytes("png")
         else:
             # Validate through Pillow first so unsupported/corrupt image files
             # produce a clear error instead of a low-level PDF exception.
@@ -432,6 +445,7 @@ def replace_pdf_cover_with_three_lines(
                     image_buffer = BytesIO()
                     converted.save(image_buffer, format="PNG")
                     cover_image = image_buffer.getvalue()
+                    cover_image_for_band_detection = cover_image
             except Exception as exc:
                 raise PdfEditingError("The replacement cover image could not be read.") from exc
             cover_page.insert_image(full_rect, stream=cover_image, keep_proportion=False)
@@ -446,14 +460,31 @@ def replace_pdf_cover_with_three_lines(
             font_name = "helv"
             font = fitz.Font(fontname="helv")
 
+        # Put the text inside the lower SLC teal/green caption band, matching
+        # the supplied reference PDF. If the band cannot be detected reliably,
+        # use the lower 25% of the page as the safe fallback caption area.
+        detected_band_top = (
+            detect_teal_band_top_fraction(cover_image_for_band_detection)
+            if cover_image_for_band_detection
+            else None
+        )
+        band_top_fraction = detected_band_top if detected_band_top is not None else 0.75
+        band_top_fraction = min(max(band_top_fraction, 0.58), 0.84)
+
+        band_top = page_rect.height * band_top_fraction
+        band_bottom = page_rect.height * 0.985
+        band_height = max(1.0, band_bottom - band_top)
+
+        # Match the reference cover: a left-aligned text block with a generous
+        # left margin, white Garamond text, and no dark panel over the photo.
+        left_margin = page_rect.width * 0.12
+        right_margin = page_rect.width * 0.08
+        safe_width = page_rect.width - left_margin - right_margin
+
         # Use one shared medium text size. Work out the exact largest size
-        # that allows the widest of the three values to fit on ONE line. This
-        # avoids PyMuPDF insert_textbox() false negatives caused by vertical
-        # font metrics (which previously produced the misleading "too long"
-        # error even for short text such as "test").
+        # that allows the widest of the three values to stay on ONE line.
         maximum_fontsize = 24.0
         minimum_fontsize = 8.0
-        safe_width = page_rect.width * 0.84
 
         widest_at_one_point = max(
             font.text_length(value, fontsize=1.0) for value in values
@@ -463,6 +494,12 @@ def replace_pdf_cover_with_three_lines(
 
         fontsize = min(maximum_fontsize, safe_width / widest_at_one_point)
         fontsize = max(minimum_fontsize, fontsize)
+
+        # Keep the complete three-line block comfortably inside the coloured
+        # band as well as within the horizontal safe area.
+        line_height_factor = 1.25
+        max_vertical_fontsize = band_height / (3.0 * line_height_factor)
+        fontsize = min(fontsize, max_vertical_fontsize)
 
         # If a line is exceptionally long, keep reducing slightly below the
         # normal minimum rather than failing with a misleading textbox error.
@@ -482,30 +519,9 @@ def replace_pdf_cover_with_three_lines(
                 "Please shorten that value."
             )
 
-        # Three single-line rows, horizontally centred as one cover title block.
-        # We use insert_text() with an explicitly calculated X position instead
-        # of insert_textbox(). That guarantees each supplied value remains a
-        # single line and removes the vertical textbox-fit bug.
-        line_height = fontsize * 1.55
+        line_height = fontsize * line_height_factor
         block_height = line_height * 3
-        top = (page_rect.height - block_height) / 2.0
-
-        # A subtle translucent panel makes white text readable on both dark and
-        # light cover images without changing the requested equal text sizing.
-        panel_pad_y = fontsize * 0.65
-        panel_rect = fitz.Rect(
-            page_rect.width * 0.055,
-            top - panel_pad_y,
-            page_rect.width * 0.945,
-            top + block_height + panel_pad_y * 0.35,
-        )
-        cover_page.draw_rect(
-            panel_rect,
-            color=None,
-            fill=(0, 0, 0),
-            fill_opacity=0.34,
-            overlay=True,
-        )
+        top = band_top + max(0.0, (band_height - block_height) / 2.0)
 
         # Font metrics are expressed relative to the font size. Using them to
         # calculate the baseline centres every line vertically within its row.
@@ -513,13 +529,11 @@ def replace_pdf_cover_with_three_lines(
         descender = float(getattr(font, "descender", -0.2))
 
         for index, value in enumerate(values):
-            text_width = font.text_length(value, fontsize=fontsize)
-            x = (page_rect.width - text_width) / 2.0
             row_center_y = top + (index + 0.5) * line_height
             baseline_y = row_center_y + ((ascender + descender) * fontsize / 2.0)
 
             cover_page.insert_text(
-                fitz.Point(x, baseline_y),
+                fitz.Point(left_margin, baseline_y),
                 value,
                 fontname=font_name,
                 fontsize=fontsize,
@@ -549,6 +563,8 @@ def replace_pdf_cover_with_three_lines(
         "course_name": values[1],
         "unit_name": values[2],
         "font_size": round(fontsize, 1),
+        "text_band_top_fraction": round(band_top_fraction, 4),
+        "text_alignment": "left",
         "pages": get_pdf_page_count(result),
     }
 
