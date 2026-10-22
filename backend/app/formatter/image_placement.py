@@ -16,7 +16,9 @@ import zipfile
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 import xml.etree.ElementTree as ET
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import ImageOps, UnidentifiedImageError
+
+from .safe_images import open_checked_image
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -205,10 +207,10 @@ def _normalise_dpi(value: object) -> Tuple[float, float]:
 
 def _prepare_image(number: int, source_name: str, payload: bytes) -> PreparedImage:
     try:
-        with Image.open(BytesIO(payload)) as check_image:
+        with open_checked_image(payload) as check_image:
             check_image.verify()
 
-        with Image.open(BytesIO(payload)) as image:
+        with open_checked_image(payload) as image:
             detected_format = (image.format or "").upper()
             width_px, height_px = image.size
             if width_px <= 0 or height_px <= 0:

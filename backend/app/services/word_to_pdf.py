@@ -144,22 +144,33 @@ def convert_word_files(file_items: list[tuple[str, bytes]]) -> tuple[str, bytes,
             input_path = input_dir / safe_docx_name
             input_path.write_bytes(payload)
 
-            completed = subprocess.run(
-                [
-                    libreoffice,
-                    profile_arg,
-                    "--headless",
-                    "--convert-to",
-                    "pdf:writer_pdf_Export",
-                    "--outdir",
-                    str(output_dir),
-                    str(input_path),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=180,
-            )
+            try:
+                completed = subprocess.run(
+                    [
+                        libreoffice,
+                        profile_arg,
+                        "--headless",
+                        "--convert-to",
+                        "pdf:writer_pdf_Export",
+                        "--outdir",
+                        str(output_dir),
+                        str(input_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise WordToPdfError(
+                    f"LibreOffice did not finish converting {name} within 180 seconds. "
+                    "Try a smaller DOCX or convert fewer documents at once."
+                ) from exc
+            except OSError as exc:
+                raise WordToPdfError(
+                    "LibreOffice could not be started on the conversion server. "
+                    "Check the backend Docker image and LibreOffice installation."
+                ) from exc
             if completed.returncode != 0:
                 message = (
                     completed.stderr

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -44,12 +45,13 @@ from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, Simple
 from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
-from .services.storage import StorageError, storage
+from .services.storage import StorageError, StorageNotFoundError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.05-v15-pdf-cover-text-fix"
+BUILD_VERSION = "2026.10.22-v16-storage-diagnostics"
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.5.0")
 
@@ -70,6 +72,14 @@ app.add_middleware(
 @app.on_event("startup")
 def create_tables() -> None:
     Base.metadata.create_all(bind=engine)
+
+
+def _storage_http_error(exc: StorageError) -> HTTPException:
+    """Return 404 for missing files; 503 when the storage service is broken."""
+    return HTTPException(
+        status_code=404 if isinstance(exc, StorageNotFoundError) else 503,
+        detail=str(exc),
+    )
 
 
 def _safe_stem(filename: str | None, fallback: str = "document") -> str:
@@ -246,7 +256,11 @@ async def format_document(
             details=details,
         )
         return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Document formatting failed for job %s", job.id)
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -296,10 +310,14 @@ async def format_document_batch(
             details=result.details,
         )
         return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except BatchFormatterError as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Batch formatting failed for job %s", job.id)
         _fail_job(db, job, exc)
         raise HTTPException(status_code=500, detail="Batch formatting failed.") from exc
 
@@ -327,12 +345,16 @@ async def word_to_pdf(
             details=details,
         )
         return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except WordToPdfError as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Word to PDF conversion failed for job %s", job.id)
         _fail_job(db, job, exc)
-        raise HTTPException(status_code=500, detail="Word to PDF conversion failed.") from exc
+        raise HTTPException(status_code=500, detail="Word to PDF conversion failed. Check backend logs for the underlying error.") from exc
 
 
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}/preview")
@@ -349,7 +371,7 @@ def preview_formatted_job(job_id: str, db: Session = Depends(get_db)) -> Respons
             [(source_job.output_filename, source_payload)]
         )
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     except WordToPdfError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -373,7 +395,7 @@ def editable_paragraphs(job_id: str, db: Session = Depends(get_db)) -> dict:
         paragraphs = get_editable_paragraphs(source_payload)
         return {"job_id": source_job.id, "paragraphs": paragraphs}
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     except SimpleEditingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -428,7 +450,10 @@ def simple_edit_formatted_job(
             details=details,
         )
         return _job_response(edit_job)
-    except (StorageError, SimpleEditingError) as exc:
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -449,7 +474,7 @@ def footer_settings(job_id: str, db: Session = Depends(get_db)) -> dict:
         settings = get_footer_settings(source_payload)
         return {"job_id": source_job.id, **settings}
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     except SimpleEditingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -504,7 +529,10 @@ def edit_paragraph_text(
             details=details,
         )
         return _job_response(edit_job)
-    except (StorageError, SimpleEditingError) as exc:
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -570,7 +598,10 @@ def edit_document_footer(
             details=details,
         )
         return _job_response(edit_job)
-    except (StorageError, SimpleEditingError) as exc:
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -638,7 +669,10 @@ def update_document_toc(job_id: str, db: Session = Depends(get_db)) -> JobRespon
             details=details,
         )
         return _job_response(edit_job)
-    except (StorageError, SimpleEditingError) as exc:
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -673,12 +707,16 @@ def convert_formatted_job_to_pdf(job_id: str, db: Session = Depends(get_db)) -> 
             details=details,
         )
         return _job_response(conversion_job)
-    except (StorageError, WordToPdfError) as exc:
+    except StorageError as exc:
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except WordToPdfError as exc:
         _fail_job(db, conversion_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Formatted document PDF conversion failed for job %s", conversion_job.id)
         _fail_job(db, conversion_job, exc)
-        raise HTTPException(status_code=500, detail="Formatted document PDF conversion failed.") from exc
+        raise HTTPException(status_code=500, detail="Formatted document PDF conversion failed. Check backend logs for details.") from exc
 
 
 @app.post(f"{API_PREFIX}/pdf/page-count")
@@ -720,9 +758,16 @@ async def pdf_remove_pages(
             details=details,
         )
         return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, PdfEditingError) as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("PDF page removal failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="PDF page removal failed. Check backend logs for details.") from exc
 
 
 @app.post(f"{API_PREFIX}/pdf/replace-cover", response_model=JobResponse)
@@ -772,12 +817,16 @@ async def pdf_replace_cover(
             details=details,
         )
         return _job_response(job)
-    except (PdfEditingError, StorageError) as exc:
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PdfEditingError as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("PDF cover replacement failed for job %s", job.id)
         _fail_job(db, job, exc)
-        raise HTTPException(status_code=500, detail="PDF cover replacement failed.") from exc
+        raise HTTPException(status_code=500, detail="PDF cover replacement failed. Check backend logs for details.") from exc
 
 
 @app.post(f"{API_PREFIX}/pdf/replace-cover-text", response_model=JobResponse)
@@ -842,12 +891,16 @@ async def pdf_replace_cover_text(
             details=details,
         )
         return _job_response(job)
-    except (PdfEditingError, StorageError) as exc:
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PdfEditingError as exc:
         _fail_job(db, job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("PDF cover/text replacement failed for job %s", job.id)
         _fail_job(db, job, exc)
-        raise HTTPException(status_code=500, detail="PDF cover/text replacement failed.") from exc
+        raise HTTPException(status_code=500, detail="PDF cover/text replacement failed. Check backend logs for details.") from exc
 
 
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}/history")
@@ -942,7 +995,7 @@ def spacing_issues(job_id: str, db: Session = Depends(get_db)) -> dict:
         issues = check_page_spacing(source_payload)
         return {"job_id": source_job.id, "issues": issues, "total": len(issues)}
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     except SimpleEditingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1003,7 +1056,10 @@ def clean_document_spacing(
             details=details,
         )
         return _job_response(edit_job)
-    except (StorageError, SimpleEditingError) as exc:
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
         _fail_job(db, edit_job, exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -1027,7 +1083,7 @@ def download_job(job_id: str, db: Session = Depends(get_db)) -> Response:
     try:
         payload = storage.get_bytes(job.output_key)
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     content_type = mimetypes.guess_type(job.output_filename)[0] or "application/octet-stream"
     return Response(
         content=payload,
@@ -1044,7 +1100,7 @@ def download_report(job_id: str, db: Session = Depends(get_db)) -> Response:
     try:
         payload = storage.get_bytes(job.report_key)
     except StorageError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _storage_http_error(exc) from exc
     return Response(
         content=payload,
         media_type="text/plain; charset=utf-8",

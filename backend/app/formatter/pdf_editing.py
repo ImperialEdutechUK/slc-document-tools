@@ -8,6 +8,8 @@ from typing import Iterable
 
 import pymupdf as fitz
 from PIL import Image
+
+from .safe_images import open_checked_image
 from pypdf import PdfReader, PdfWriter
 
 from .cover_layout import detect_teal_band_top_fraction
@@ -163,7 +165,7 @@ def _cover_page_from_upload(cover_bytes: bytes, filename: str | None):
         raise PdfEditingError("The replacement cover must be a PDF, JPG, PNG, or WebP file.")
 
     try:
-        with Image.open(BytesIO(cover_bytes)) as image:
+        with open_checked_image(cover_bytes) as image:
             converted = image.convert("RGB")
             image_pdf = BytesIO()
             converted.save(image_pdf, format="PDF", resolution=72.0)
@@ -490,7 +492,7 @@ def replace_pdf_cover_with_three_lines(
             # Validate through Pillow first so unsupported/corrupt image files
             # produce a clear error instead of a low-level PDF exception.
             try:
-                with Image.open(BytesIO(cover_bytes)) as image:
+                with open_checked_image(cover_bytes) as image:
                     converted = image.convert("RGB")
                     image_buffer = BytesIO()
                     converted.save(image_buffer, format="PNG")

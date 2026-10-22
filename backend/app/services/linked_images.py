@@ -15,9 +15,10 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import UnidentifiedImageError
 
 from ..formatter.image_placement import prepare_image_catalog
+from ..formatter.safe_images import open_checked_image
 from .freepik_account import account_fallback_configured, download_with_accounts
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -464,7 +465,7 @@ def _download_stock_resource(url: str) -> bytes:
 
 def _verify_image(payload: bytes) -> None:
     try:
-        with Image.open(BytesIO(payload)) as image:
+        with open_checked_image(payload) as image:
             image.verify()
     except (UnidentifiedImageError, OSError, SyntaxError) as exc:
         raise ValueError("The downloaded file is not a valid image.") from exc
