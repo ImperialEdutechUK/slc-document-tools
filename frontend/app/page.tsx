@@ -1888,7 +1888,9 @@ function CourseImagesPanel() {
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [courseName, setCourseName] = useState("");
   const [mode, setMode] = useState<"guides" | "insert">("guides");
-  const [generateMissing, setGenerateMissing] = useState(true);
+  const [imageSource, setImageSource] = useState<"auto" | "freepik" | "pexels" | "generate">("auto");
+  const [generateMissing, setGenerateMissing] = useState(false);
+  const [useOpenrouter, setUseOpenrouter] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
@@ -1904,7 +1906,9 @@ function CourseImagesPanel() {
       form.append("document", file);
       form.append("course_name", courseName);
       form.append("mode", mode);
-      form.append("generate_missing", String(generateMissing));
+      form.append("image_source", imageSource);
+      form.append("generate_missing", String(generateMissing || imageSource === "generate"));
+      form.append("use_openrouter", String(useOpenrouter));
       if (coverFile) form.append("cover_image", coverFile);
       const result = await apiRequest("/api/v1/course-images/prepare", {
         method: "POST",
@@ -1988,25 +1992,50 @@ function CourseImagesPanel() {
             />
             <span>
               <strong>Automatically add images to Word</strong>
-              <small>Search Pexels and insert relevant landscape photos below selected headings. Generate missing photos if enabled, without rewriting lesson text.</small>
+              <small>Find licensed stock photographs using Pexels or Freepik, or generate relevant images with Freepik AI. Preserve lesson wording and styles.</small>
             </span>
           </label>
+          <label className="input-label">
+            Image source
+            <select
+              value={imageSource}
+              onChange={(event) => { setImageSource(event.target.value as typeof imageSource); setJob(null); }}
+            >
+              <option value="auto">Find stock: Pexels, then Freepik</option>
+              <option value="freepik">Find stock: Freepik only</option>
+              <option value="pexels">Find stock: Pexels only</option>
+              <option value="generate">Generate new images: Freepik AI</option>
+            </select>
+          </label>
+          {imageSource !== "generate" && (
+            <label className="toggle-row">
+              <input
+                type="checkbox" checked={generateMissing}
+                onChange={(event) => { setGenerateMissing(event.target.checked); setJob(null); }}
+              />
+              <span>
+                <strong>Generate only when no matching stock photo is found</strong>
+                <small>Optional; uses Freepik AI or an OpenAI image API key. Image generation uses provider credits and has a configurable job limit.</small>
+              </span>
+            </label>
+          )}
           <label className="toggle-row">
             <input
-              type="checkbox" checked={generateMissing}
-              onChange={(event) => setGenerateMissing(event.target.checked)}
+              type="checkbox" checked={useOpenrouter}
+              onChange={(event) => { setUseOpenrouter(event.target.checked); setJob(null); }}
             />
             <span>
-              <strong>Generate images when stock search has no suitable match</strong>
-              <small>Requires the server-side OpenAI image API key. Stock-photo downloads require a Pexels API key. Without keys, search guides still work.</small>
+              <strong>Use OpenRouter to improve image search ideas</strong>
+              <small>Optional AI analysis of chapter headings and short passages for more specific searches and photo descriptions. Needs OPENROUTER_API_KEY on the backend.</small>
             </span>
           </label>
+          <p className="input-help">Freepik stock access uses FREEPIK_API_KEY (or MAGNIFIC_API_KEY). The generated-image option uses Freepik's Flux 2 Pro model, with optional OpenAI fallback. If no provider keys are configured, search guides still work.</p>
         </section>
       </div>
 
       <section className="card compact-card">
         <h3>What stays unchanged?</h3>
-        <p>Original lesson wording, headings, styles, numbering, tables and existing photographs are retained. Image placements exclude Summary, Conclusion, References, Bibliography and contents sections. Cover titles are left blank, with a charcoal panel and thin gold divider. StockSnap is offered as a search link, not an unlicensed automatic download.</p>
+        <p>Original lesson wording, headings, styles, numbering, tables and existing photographs are retained. Image placements exclude Summary, Conclusion, References, Bibliography and contents sections. Cover titles are left blank, with a charcoal panel and thin gold divider. Pexels and StockSnap search links remain in guides; when Freepik is configured, it is also linked. Freepik stock licences and attribution must be reviewed before publication. OpenRouter and Freepik calls may incur charges.</p>
       </section>
 
       {error && <div className="error-box" role="alert">{error}</div>}
@@ -2027,6 +2056,8 @@ function CourseImagesPanel() {
               <div><strong>{details?.image_recommendations ?? 0}</strong><span>Suggested placements</span></div>
               <div><strong>{details?.photos_inserted ?? 0}</strong><span>Photos inserted</span></div>
               <div><strong>{details?.covers_prepared ?? 0}</strong><span>Cover images</span></div>
+              <div><strong>{details?.openrouter_refined_sections ?? 0}</strong><span>OpenRouter suggestions</span></div>
+              <div><strong>{details?.generation_attempts ?? 0}</strong><span>Image generation attempts</span></div>
             </div>
             {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
               <div className="image-warning-list">
@@ -2034,7 +2065,10 @@ function CourseImagesPanel() {
                 <ul>{details.warnings.map((message: string, i: number) => <li key={i}>{message}</li>)}</ul>
               </div>
             )}
-            <p className="image-credit">Search photographs via <a href="https://www.pexels.com/" target="_blank" rel="noreferrer">Pexels</a> or <a href="https://stocksnap.io/" target="_blank" rel="noreferrer">StockSnap</a>; verify each photo is suitable before publication.</p>
+            {Array.isArray(details?.image_sources) && details.image_sources.some((item: any) => item.provider === "Freepik") && (
+              <p className="image-credit">Freepik stock photos are listed with source links and available licence information in the downloaded guides. Check the required attribution and usage rights.</p>
+            )}
+            <p className="image-credit">Search photographs via <a href="https://www.pexels.com/" target="_blank" rel="noreferrer">Pexels</a>, <a href="https://stocksnap.io/" target="_blank" rel="noreferrer">StockSnap</a> or <a href="https://www.freepik.com/" target="_blank" rel="noreferrer">Freepik</a>; verify every photo's licence and subject relevance before publication.</p>
           </section>
         </>
       )}

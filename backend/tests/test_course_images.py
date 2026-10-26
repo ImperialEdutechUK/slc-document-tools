@@ -143,6 +143,32 @@ class CourseImagesTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(result.payload)) as z:
             self.assertEqual(len([n for n in z.namelist() if n.endswith("_Matching_Image_Search_Guide.docx")]), 2)
 
+    def test_new_freepik_source_selection_inserts_and_adds_guide_links(self):
+        provider = FakeProvider()
+        provider.freepik_key = "offline-mocked-key"
+        result = build_course_image_package(
+            chapter(), "Chapter 3.docx", course_name="Confidentiality in Care",
+            mode="insert", image_source="freepik", generate_missing=False, provider=provider,
+        )
+        self.assertEqual(result.details["image_source"], "freepik")
+        self.assertEqual(result.details["photos_inserted"], 2)
+        self.assertTrue(result.details["providers_configured"]["freepik"])
+        self.assertEqual(result.details["generation_attempts"], 0)
+        with zipfile.ZipFile(BytesIO(result.payload)) as archive:
+            guide = Document(BytesIO(archive.read(
+                "Matching Image Search Guides/3_Matching_Image_Search_Guide.docx"
+            )))
+            hrefs = [rel.target_ref for rel in guide.part.rels.values() if rel.reltype.endswith("/hyperlink")]
+            self.assertEqual(len([url for url in hrefs if "freepik.com/search" in url]), 2)
+
+    def test_openrouter_not_required_for_guide_only_mode(self):
+        no_provider = Provider(pexels_key="", freepik_key="", openai_key="", openrouter_key="")
+        result = build_course_image_package(
+            chapter(), "Lesson.docx", mode="guides", use_openrouter=True, provider=no_provider,
+        )
+        self.assertEqual(result.details["openrouter_refined_sections"], 0)
+        self.assertTrue(any("OPENROUTER_API_KEY" in message for message in result.details["warnings"]))
+
     def test_corrects_only_coloured_panel_and_preserves_photo(self):
         raw = Image.new("RGB", (900, 1250), (140, 175, 190))
         from PIL import ImageDraw

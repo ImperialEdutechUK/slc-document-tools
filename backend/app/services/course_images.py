@@ -28,6 +28,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 from .zip_utils import normalise_zip_name, safe_zip_member
+from .course_image_integrations import FreepikImages, OpenRouterScenes, freepik_connection
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
@@ -70,6 +71,12 @@ class ImagePlan:
     context: str = ""
     source: str = ""
     source_url: str = ""
+    source_licence: str = ""
+    source_author: str = ""
+
+    @property
+    def freepik_link(self) -> str:
+        return "https://www.freepik.com/search?query=" + quote_plus(self.search.strip())
 
     @property
     def pexels_link(self) -> str:
@@ -86,6 +93,8 @@ class Picture:
     source: str
     source_url: str = ""
     identifier: str = ""
+    licence: str = ""
+    author: str = ""
 
 
 @dataclass
@@ -102,30 +111,125 @@ class Provider:
     pexels_key: str = field(default_factory=lambda: os.getenv("PEXELS_API_KEY", "").strip())
     openai_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
     image_model: str = field(default_factory=lambda: os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2.5-flare"))
+    freepik_key: str = field(default_factory=lambda: freepik_connection()[0])
+    freepik_model: str = field(default_factory=lambda: os.getenv("FREEPIK_IMAGE_MODEL", "flux-2-pro").strip())
+    openrouter_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", "").strip())
+    openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip())
+    stock_source: str = "auto"
+    max_generations: int = field(default_factory=lambda: max(0, min(30, int(os.getenv("COURSE_IMAGE_MAX_GENERATIONS", "8")))))
+    generations_used: int = 0
+    refined_sections: int = 0
     used_photos: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
     @property
     def available(self) -> bool:
-        return bool(self.pexels_key or self.openai_key)
+        return bool(self.pexels_key or self.freepik_key or self.openai_key)
+
+    def can_acquire(self, *, generate: bool) -> bool:
+        if self.stock_source == "generate":
+            return bool(self.freepik_key or self.openai_key)
+        stock_available = (
+            (self.stock_source in {"auto", "pexels"} and bool(self.pexels_key))
+            or (self.stock_source in {"auto", "freepik"} and bool(self.freepik_key))
+        )
+        return stock_available or (generate and bool(self.freepik_key or self.openai_key))
+
+    def _freepik(self) -> FreepikImages:
+        _, base, header = freepik_connection()
+        return FreepikImages(self.freepik_key, base=base, header=header)
 
     def find(
         self, query: str, *, portrait: bool = False, generate: bool = True,
         prompt: str = "", subject: str = "",
     ) -> Picture | None:
-        if self.pexels_key:
+        if self.stock_source in {"auto", "pexels"} and self.pexels_key:
             try:
                 found = self._stock(query, portrait=portrait, subject=subject)
                 if found:
                     return found
             except (httpx.HTTPError, ValueError, OSError) as exc:
                 self.warnings.append(f"Pexels lookup was unsuccessful: {type(exc).__name__}.")
-        if generate and self.openai_key:
+        if self.stock_source in {"auto", "freepik"} and self.freepik_key:
             try:
-                return self._generate(prompt or query, portrait=portrait)
-            except (httpx.HTTPError, ValueError, OSError, KeyError) as exc:
-                self.warnings.append(f"AI image generation was unsuccessful: {type(exc).__name__}.")
+                result = self._freepik().search_photo(
+                    query, subject=subject, portrait=portrait, used=self.used_photos,
+                    normalise=lambda raw: _normalised_image(raw, portrait=portrait),
+                )
+                if result:
+                    raw, page, identifier, licence, author = result
+                    self.used_photos.add(identifier)
+                    return Picture(raw, "Freepik", page, identifier, licence, author)
+            except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+                self.warnings.append(f"Freepik stock lookup was unsuccessful: {type(exc).__name__}.")
+        if (generate or self.stock_source == "generate") and (self.freepik_key or self.openai_key):
+            if self.generations_used >= self.max_generations:
+                message = f"Generation limit of {self.max_generations} images reached; missing images were not fabricated."
+                if message not in self.warnings:
+                    self.warnings.append(message)
+                return None
+            self.generations_used += 1  # count attempts, not only successful paid generations
+            if self.freepik_key:
+                try:
+                    scene = (
+                        "Professional candid ultra-photorealistic educational stock photo. "
+                        "Natural lighting, plausible people and equipment, realistic environment, "
+                        "no text, logos, labels, watermarks, or legible personal data. "
+                        + (prompt or query)[:1900]
+                    )
+                    payload = self._freepik().generate_photo(
+                        scene, portrait=portrait, model=self.freepik_model,
+                        normalise=lambda raw: _normalised_image(raw, portrait=portrait),
+                    )
+                    return Picture(payload, "Freepik AI-generated")
+                except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+                    self.warnings.append(f"Freepik generation was unsuccessful: {type(exc).__name__}.")
+            if self.openai_key:
+                try:
+                    return self._generate(prompt or query, portrait=portrait)
+                except (httpx.HTTPError, ValueError, OSError, KeyError) as exc:
+                    self.warnings.append(f"OpenAI generation was unsuccessful: {type(exc).__name__}.")
         return None
+
+    def refine_plans(self, course: str, chapter: str, plans: list[ImagePlan]) -> None:
+        """Use OpenRouter only when explicitly requested; preserve original headings."""
+        if not self.openrouter_key:
+            self.warnings.append("OpenRouter refinement requested but OPENROUTER_API_KEY is not configured; used local scene suggestions.")
+            return
+        try:
+            planner = OpenRouterScenes(self.openrouter_key, self.openrouter_model)
+            for start in range(0, len(plans), 10):
+                chunk = plans[start:start + 10]
+                items = [
+                    {"id": i, "heading": plan.heading[:160], "excerpt": plan.context[:340]}
+                    for i, plan in enumerate(chunk)
+                ]
+                proposed = planner.improve(course, chapter, items)
+                for suggestion in proposed:
+                    if not isinstance(suggestion, dict):
+                        continue
+                    index = suggestion.get("id")
+                    if type(index) is not int or not (0 <= index < len(chunk)):
+                        continue
+                    search = suggestion.get("search")
+                    photo = suggestion.get("photo")
+                    if not isinstance(search, str) or not isinstance(photo, str):
+                        continue
+                    search = " ".join(search.split())[:110]
+                    photo = " ".join(photo.split())[:450]
+                    heading_tokens = set(_tokens(chunk[index].heading))
+                    answer_tokens = set(_tokens(search + " " + photo))
+                    if not (3 <= len(search) <= 110 and 25 <= len(photo) <= 450):
+                        continue
+                    if heading_tokens and not heading_tokens & answer_tokens:
+                        continue
+                    if "http:" in photo.lower() or "https:" in photo.lower():
+                        continue
+                    chunk[index].search = search
+                    chunk[index].description = photo
+                    self.refined_sections += 1
+        except (httpx.HTTPError, ValueError, OSError, TypeError, KeyError) as exc:
+            self.warnings.append(f"OpenRouter prompt refinement was unsuccessful ({type(exc).__name__}); used local suggestions.")
 
     def _stock(self, query: str, *, portrait: bool, subject: str = "") -> Picture | None:
         headers = {"Authorization": self.pexels_key}
@@ -146,7 +250,7 @@ class Provider:
             ranked: list[tuple[int, dict]] = []
             for photo in photos:
                 identifier = str(photo.get("id", ""))
-                if not identifier or identifier in self.used_photos:
+                if not identifier or f"pexels:{identifier}" in self.used_photos:
                     continue
                 alt = set(_tokens(str(photo.get("alt", ""))))
                 # Don't silently accept unrelated search hits. A relevant
@@ -175,8 +279,8 @@ class Provider:
                 except (httpx.HTTPError, ValueError, OSError, UnidentifiedImageError):
                     continue
                 identifier = str(photo["id"])
-                self.used_photos.add(identifier)
-                return Picture(payload, "Pexels", str(photo.get("url", "")), identifier)
+                self.used_photos.add(f"pexels:{identifier}")
+                return Picture(payload, "Pexels", str(photo.get("url", "")), f"pexels:{identifier}")
         return None
 
     def _generate(self, prompt: str, *, portrait: bool) -> Picture:
@@ -413,7 +517,7 @@ def _hyperlink(paragraph: Paragraph, label: str, url: str) -> None:
     paragraph._p.append(link)
 
 
-def _write_guide(course_title: str, chapter: Chapter, plans: list[ImagePlan]) -> bytes:
+def _write_guide(course_title: str, chapter: Chapter, plans: list[ImagePlan], *, freepik_links: bool = False) -> bytes:
     doc = Document()
     section = doc.sections[0]
     section.top_margin = Inches(0.8)
@@ -451,6 +555,15 @@ def _write_guide(course_title: str, chapter: Chapter, plans: list[ImagePlan]) ->
         _hyperlink(p, "Pexels – search photos", plan.pexels_link)
         p = doc.add_paragraph()
         _hyperlink(p, "StockSnap – search photos", plan.stocksnap_link)
+        if freepik_links:
+            p = doc.add_paragraph()
+            _hyperlink(p, "Freepik – check licence before use", plan.freepik_link)
+        if plan.source_licence:
+            p = doc.add_paragraph()
+            p.add_run("Stock licence: ").bold = True
+            p.add_run(plan.source_licence + "; review publication and attribution terms.")
+            if plan.source_author:
+                p.add_run(" Credit: " + plan.source_author + ".")
         if plan.source_url:
             p = doc.add_paragraph()
             p.add_run("Selected photograph: ").bold = True
@@ -564,17 +677,25 @@ def _cover_for_course(
     )
     if not photo:
         return None, "No relevant cover photograph was available; cover not fabricated."
-    return _compose_cover(photo.payload), f"Cover photograph: {photo.source}" + (f" ({photo.source_url})" if photo.source_url else "")
+    note = f"Cover photograph: {photo.source}" + (f" ({photo.source_url})" if photo.source_url else "")
+    if photo.licence:
+        note += f"; licence metadata: {photo.licence} (verify rights and attribution before publication)"
+    if photo.author:
+        note += f"; author: {photo.author}"
+    return _compose_cover(photo.payload), note
 
 
 def build_course_image_package(
     raw: bytes, filename: str, *, course_name: str = "", mode: str = "guides",
     generate_missing: bool = True, cover_upload: bytes | None = None,
+    image_source: str = "auto", use_openrouter: bool = False,
     provider: Provider | None = None,
 ) -> CourseImagesResult:
     """Produce exact guide+cover folders or optional non-destructive DOCX enhancement."""
     if mode not in {"guides", "insert"}:
         raise CourseImagesError("Choose search guides or automatic image insertion.")
+    if image_source not in {"auto", "pexels", "freepik", "generate"}:
+        raise CourseImagesError("Choose a valid stock image or generation source.")
     if not raw:
         raise CourseImagesError("The uploaded document is empty.")
     chapters, provided_covers = _read_chapters(raw, filename)
@@ -583,18 +704,24 @@ def build_course_image_package(
             raise CourseImagesError("Cover upload is too large.")
         provided_covers = [("uploaded_cover.png", cover_upload)]
     provider = provider if provider is not None else Provider()
-    if mode == "insert" and not provider.available:
+    provider.stock_source = image_source
+    if image_source == "generate":
+        generate_missing = True
+    if mode == "insert" and not provider.can_acquire(generate=generate_missing):
         raise CourseImagesError(
-            "Automatic insertion needs a PEXELS_API_KEY or OPENAI_API_KEY configured "
-            "on the backend. Search guides can be created without either key."
+            "No compatible image provider is configured. Configure FREEPIK_API_KEY "
+            "(or MAGNIFIC_API_KEY), PEXELS_API_KEY, or OPENAI_API_KEY on the backend; "
+            "select a matching image source, or choose guides-only mode."
         )
 
     enhanced: list[tuple[str, bytes]] = []
     guides: list[tuple[str, bytes]] = []
     cover_assets: list[tuple[str, bytes]] = []
+    cover_sources: list[dict] = []
     warnings: list[str] = []
     photos_inserted = 0
     total_recommended = 0
+    sources: list[dict] = []
     used_guide_names: set[str] = set()
     course_title = course_name.strip() or (
         _chapter_title(filename) if Path(filename).suffix.lower() == ".zip" else chapters[0].title
@@ -603,6 +730,8 @@ def build_course_image_package(
         try:
             document = Document(BytesIO(chapter.payload))
             plans, eligible_count = _plans(document, course_title + " " + chapter.title)
+            if use_openrouter and plans:
+                provider.refine_plans(course_title, chapter.title, plans)
             total_recommended += len(plans)
             acquired: dict[int, Picture] = {}
             if mode == "insert":
@@ -617,6 +746,13 @@ def build_course_image_package(
                         acquired[plan.paragraph_index] = photo
                         plan.source = photo.source
                         plan.source_url = photo.source_url
+                        plan.source_licence = photo.licence
+                        plan.source_author = photo.author
+                        sources.append({
+                            "chapter": chapter.filename, "heading": plan.heading,
+                            "provider": photo.source, "source_url": photo.source_url,
+                            "licence": photo.licence, "author": photo.author,
+                        })
                     else:
                         warnings.append(f"{chapter.filename}: no suitable image found for '{plan.heading}'.")
                 photos_inserted += len(acquired)
@@ -625,7 +761,10 @@ def build_course_image_package(
             if name.lower() in used_guide_names:
                 name = f"{chapter.number}_{len(guides)+1}_Matching_Image_Search_Guide.docx"
             used_guide_names.add(name.lower())
-            guides.append((name, _write_guide(course_title, chapter, plans)))
+            guides.append((name, _write_guide(
+                course_title, chapter, plans,
+                freepik_links=bool(provider.freepik_key and image_source in {"auto", "freepik"}),
+            )))
             if not plans:
                 warnings.append(f"{chapter.filename}: no eligible headings without an existing image were found.")
         except Exception as exc:
@@ -654,6 +793,7 @@ def build_course_image_package(
         cover, note = _cover_for_course(title, supplied, provider, generate=generate_missing)
         if cover:
             cover_assets.append((f"{_safe_name(title)}_cover.png", cover))
+            cover_sources.append({"cover": title, "source_note": note})
         else:
             warnings.append(f"{title}: {note}")
 
@@ -688,8 +828,16 @@ def build_course_image_package(
         "photos_inserted": photos_inserted,
         "covers_prepared": len(cover_assets),
         "mode": mode,
+        "image_source": image_source,
+        "openrouter_refined_sections": provider.refined_sections,
+        "generation_attempts": provider.generations_used,
+        "image_sources": sources,
+        "cover_sources": cover_sources,
         "warnings": list(dict.fromkeys(warnings)),
-        "providers_configured": {"pexels": bool(provider.pexels_key), "ai_generation": bool(provider.openai_key)},
+        "providers_configured": {
+            "pexels": bool(provider.pexels_key), "freepik": bool(provider.freepik_key),
+            "openrouter": bool(provider.openrouter_key), "openai": bool(provider.openai_key),
+        },
     }
     return CourseImagesResult(
         filename=f"{_safe_name(course_title)}_Matching_Image_Guides_and_Covers.zip" if mode == "guides"

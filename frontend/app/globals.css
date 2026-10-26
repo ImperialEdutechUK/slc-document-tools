@@ -415,7 +415,8 @@ a {
   font-weight: 700;
 }
 
-.input-label input {
+.input-label input,
+.input-label select {
   width: 100%;
 
   border:
@@ -437,13 +438,22 @@ a {
     box-shadow 0.2s ease;
 }
 
-.input-label input:focus {
+.input-label input:focus,
+.input-label select:focus {
   border-color:
     rgba(84, 220, 224, 0.6);
 
   box-shadow:
     0 0 0 3px
     rgba(50, 194, 200, 0.08);
+}
+
+.input-help {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 12px 0 0;
 }
 
 /* -------------------------------------------------------

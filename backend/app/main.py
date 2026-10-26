@@ -52,7 +52,7 @@ from .services.course_images import CourseImagesError, build_course_image_packag
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.26-v17-course-images"
+BUILD_VERSION = "2026.10.26-v18-freepik-openrouter-image-finder"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -329,7 +329,9 @@ async def prepare_course_images(
     document: Annotated[UploadFile, File(...)],
     course_name: Annotated[str, Form()] = "",
     mode: Annotated[str, Form()] = "guides",
-    generate_missing: Annotated[bool, Form()] = True,
+    generate_missing: Annotated[bool, Form()] = False,
+    image_source: Annotated[str, Form()] = "auto",
+    use_openrouter: Annotated[bool, Form()] = False,
     cover_image: Annotated[UploadFile | None, File()] = None,
     db: Session = Depends(get_db),
 ) -> JobResponse:
@@ -339,6 +341,8 @@ async def prepare_course_images(
         raise HTTPException(status_code=400, detail="Upload one DOCX or a ZIP of chapters.")
     if mode not in {"guides", "insert"}:
         raise HTTPException(status_code=400, detail="Invalid image workflow mode.")
+    if image_source not in {"auto", "pexels", "freepik", "generate"}:
+        raise HTTPException(status_code=400, detail="Invalid image source selection.")
     job = _new_job(db, "course_images_" + mode, filename)
     try:
         source_bytes = await document.read()
@@ -352,6 +356,8 @@ async def prepare_course_images(
             mode=mode,
             generate_missing=generate_missing,
             cover_upload=cover_bytes,
+            image_source=image_source,
+            use_openrouter=use_openrouter,
         )
         result.details["build"] = BUILD_VERSION
         output_key = f"jobs/{job.id}/{result.filename}"
