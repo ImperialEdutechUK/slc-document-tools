@@ -52,7 +52,7 @@ from .services.course_images import CourseImagesError, build_course_image_packag
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.26-v18-freepik-openrouter-image-finder"
+BUILD_VERSION = "2026.10.26-v19-direct-word-download-visible-image-options"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -361,7 +361,12 @@ async def prepare_course_images(
         )
         result.details["build"] = BUILD_VERSION
         output_key = f"jobs/{job.id}/{result.filename}"
-        storage.put_bytes(output_key, result.payload, "application/zip")
+        content_type = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if result.filename.lower().endswith(".docx")
+            else "application/zip"
+        )
+        storage.put_bytes(output_key, result.payload, content_type)
         job = _complete_job(
             db, job,
             output_filename=result.filename,

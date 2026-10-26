@@ -98,16 +98,17 @@ class CourseImagesTests(unittest.TestCase):
             provider=FakeProvider(),
         )
         self.assertEqual(result.details["photos_inserted"], 2)
-        with zipfile.ZipFile(BytesIO(result.payload)) as archive:
-            name = "Word Documents With Images/Unit 2_with_images.docx"
-            self.assertIn(name, archive.namelist())
-            doc = Document(BytesIO(archive.read(name)))
-            self.assertEqual([(p.text, p.style.name) for p in doc.paragraphs if p.text], expected)
-            self.assertEqual(len(doc.inline_shapes), 2)
-            for label in ("Secure storage and access", "Responding to requests"):
-                heading_index = next(i for i, p in enumerate(doc.paragraphs) if p.text == label)
-                self.assertTrue(doc.paragraphs[heading_index + 1]._p.xpath(".//w:drawing"))
-            self.assertEqual(len([p for p in doc.paragraphs if p.text == "Summary"]), 1)
+        self.assertEqual(result.filename, "Unit 2_with_images.docx")
+        self.assertEqual(result.details["output_format"], "docx")
+        self.assertEqual(result.details["guides_created"], 0)
+        self.assertEqual(result.details["covers_prepared"], 0)
+        doc = Document(BytesIO(result.payload))
+        self.assertEqual([(p.text, p.style.name) for p in doc.paragraphs if p.text], expected)
+        self.assertEqual(len(doc.inline_shapes), 2)
+        for label in ("Secure storage and access", "Responding to requests"):
+            heading_index = next(i for i, p in enumerate(doc.paragraphs) if p.text == label)
+            self.assertTrue(doc.paragraphs[heading_index + 1]._p.xpath(".//w:drawing"))
+        self.assertEqual(len([p for p in doc.paragraphs if p.text == "Summary"]), 1)
 
     def test_does_not_offer_duplicate_image_below_existing_one(self):
         doc = Document()
@@ -143,7 +144,7 @@ class CourseImagesTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(result.payload)) as z:
             self.assertEqual(len([n for n in z.namelist() if n.endswith("_Matching_Image_Search_Guide.docx")]), 2)
 
-    def test_new_freepik_source_selection_inserts_and_adds_guide_links(self):
+    def test_new_freepik_source_selection_returns_word_without_extra_assets(self):
         provider = FakeProvider()
         provider.freepik_key = "offline-mocked-key"
         result = build_course_image_package(
@@ -154,12 +155,46 @@ class CourseImagesTests(unittest.TestCase):
         self.assertEqual(result.details["photos_inserted"], 2)
         self.assertTrue(result.details["providers_configured"]["freepik"])
         self.assertEqual(result.details["generation_attempts"], 0)
+        self.assertEqual(result.filename, "Chapter 3_with_images.docx")
+        self.assertEqual(result.details["covers_prepared"], 0)
+        self.assertEqual(result.details["guides_created"], 0)
+        self.assertEqual(len(Document(BytesIO(result.payload)).inline_shapes), 2)
+        # No unnecessary cover request is made during document insertion.
+        self.assertEqual(provider.count, 2)
+
+    def test_freepik_links_remain_available_in_optional_guide_mode(self):
+        provider = FakeProvider()
+        provider.freepik_key = "offline-mocked-key"
+        result = build_course_image_package(
+            chapter(), "Chapter 3.docx", mode="guides", image_source="freepik",
+            provider=provider,
+        )
         with zipfile.ZipFile(BytesIO(result.payload)) as archive:
             guide = Document(BytesIO(archive.read(
                 "Matching Image Search Guides/3_Matching_Image_Search_Guide.docx"
             )))
             hrefs = [rel.target_ref for rel in guide.part.rels.values() if rel.reltype.endswith("/hyperlink")]
             self.assertEqual(len([url for url in hrefs if "freepik.com/search" in url]), 2)
+
+    def test_zip_input_downloads_zip_of_only_edited_documents(self):
+        source = pack([
+            ("Unit 01.docx", chapter()),
+            ("nested/Unit 02.docx", chapter()),
+            ("Written Assignment Template.docx", chapter()),
+        ])
+        result = build_course_image_package(
+            source, "My Course.zip", mode="insert", provider=FakeProvider(),
+        )
+        self.assertTrue(result.filename.endswith(".zip"))
+        self.assertEqual(result.details["output_format"], "zip")
+        self.assertEqual(result.details["documents_with_images"], 2)
+        self.assertEqual(result.details["guides_created"], 0)
+        self.assertEqual(result.details["covers_prepared"], 0)
+        with zipfile.ZipFile(BytesIO(result.payload)) as archive:
+            self.assertEqual(sorted(archive.namelist()), [
+                "Unit 01_with_images.docx", "Unit 02_with_images.docx",
+            ])
+            self.assertEqual(len(Document(BytesIO(archive.read("Unit 01_with_images.docx"))).inline_shapes), 2)
 
     def test_openrouter_not_required_for_guide_only_mode(self):
         no_provider = Provider(pexels_key="", freepik_key="", openai_key="", openrouter_key="")

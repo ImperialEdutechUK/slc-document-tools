@@ -29,9 +29,11 @@ The original formatting engine has been extracted from Streamlit and reused by F
 
 A dedicated **Find & Add Images** tab now supports chapters with no existing photographs. It follows the uploaded course-image master prompt (see `docs/COURSE_IMAGE_MASTER_PROMPT.txt`). Upload a DOCX or ZIP of chapters and choose:
 
-- **Image search guides & covers:** creates one DOCX guide per chapter with relevant photograph descriptions, precise heading-based placements, clickable Pexels/StockSnap searches and (when a photo source is available) a course cover with a blank charcoal lower panel and gold separator. It never modifies lesson documents and the output ZIP has only `Matching Image Search Guides/` and `Cover Images/`.
-- **Automatically add images to Word:** choose Pexels stock, Freepik/Magnific stock, both stock catalogues or Freepik AI image generation, inserts suitable pictures beneath about 50% of eligible headings, and additionally returns `Word Documents With Images/`. Original wording and formatting are preserved, although inserting photographs can change page flow.
+- **Automatically add images to Word (default):** choose Pexels stock, Freepik/Magnific stock, both stock catalogues or Freepik AI generation. Suitable photographs are inserted beneath approximately 50% of eligible headings. Upload **one DOCX to download one enhanced DOCX directly**; upload a **ZIP of chapters to download a ZIP containing only enhanced DOCX files** (no guide or cover folders). Lesson wording and styles are preserved, although inserting photographs can change page flow. Cover generation is skipped in this mode.
+- **Image search guides & covers (optional):** creates one DOCX guide per chapter with relevant photograph descriptions, precise heading-based placements, clickable Pexels/StockSnap searches and (when a photo source is available) a course cover with a blank charcoal lower panel and gold separator. It never modifies lesson documents and the output ZIP has only `Matching Image Search Guides/` and `Cover Images/`.
 - **OpenRouter visual-scene refinement:** optional text-only AI analysis of headings and short excerpts makes image searches and descriptions more relevant. Requests are opt-in and use server-side credentials. If the model fails, the original rule-based plans are retained.
+
+All four image-source options now appear as accessible, high-contrast radio cards instead of an operating-system dropdown. The long photo-search and "What stays unchanged?" explanatory text has been removed from the web interface; licensing guidance remains in `docs/COURSE_IMAGES_WORKFLOW.md`.
 
 Summary/Conclusion/References/Contents headings are excluded; repeated stock photos are avoided. Without image provider keys, the guide-only workflow still functions, but auto-insertion and new photographic covers require configuration.
 
@@ -168,7 +170,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.10.26-v17-course-images`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.10.26-v19-direct-word-download-visible-image-options`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 

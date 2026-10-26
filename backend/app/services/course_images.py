@@ -1,7 +1,9 @@
-"""Search guides, cover images and optional in-document imagery for image-free courses.
+"""Find chapter photographs, insert them into Word, or prepare optional guides.
 
 The original course DOCX is never reformatted: insert mode only appends standalone
-image paragraphs after selected headings. Guide mode never returns modified DOCX.
+image paragraphs after selected headings. A single input DOCX returns a DOCX,
+while multiple input chapters return a ZIP containing just the enhanced Word files.
+Guide mode never returns modified DOCX.
 External image providers are opt-in via server-side environment variables.
 """
 
@@ -691,7 +693,7 @@ def build_course_image_package(
     image_source: str = "auto", use_openrouter: bool = False,
     provider: Provider | None = None,
 ) -> CourseImagesResult:
-    """Produce exact guide+cover folders or optional non-destructive DOCX enhancement."""
+    """Return edited Word documents directly, or separate guide+cover assets."""
     if mode not in {"guides", "insert"}:
         raise CourseImagesError("Choose search guides or automatic image insertion.")
     if image_source not in {"auto", "pexels", "freepik", "generate"}:
@@ -723,6 +725,7 @@ def build_course_image_package(
     total_recommended = 0
     sources: list[dict] = []
     used_guide_names: set[str] = set()
+    successful_chapters = 0
     course_title = course_name.strip() or (
         _chapter_title(filename) if Path(filename).suffix.lower() == ".zip" else chapters[0].title
     )
@@ -757,14 +760,16 @@ def build_course_image_package(
                         warnings.append(f"{chapter.filename}: no suitable image found for '{plan.heading}'.")
                 photos_inserted += len(acquired)
                 enhanced.append((f"{Path(chapter.filename).stem}_with_images.docx", _insert_images(document, plans, acquired)))
-            name = f"{chapter.number}_Matching_Image_Search_Guide.docx"
-            if name.lower() in used_guide_names:
-                name = f"{chapter.number}_{len(guides)+1}_Matching_Image_Search_Guide.docx"
-            used_guide_names.add(name.lower())
-            guides.append((name, _write_guide(
-                course_title, chapter, plans,
-                freepik_links=bool(provider.freepik_key and image_source in {"auto", "freepik"}),
-            )))
+            else:
+                name = f"{chapter.number}_Matching_Image_Search_Guide.docx"
+                if name.lower() in used_guide_names:
+                    name = f"{chapter.number}_{len(guides)+1}_Matching_Image_Search_Guide.docx"
+                used_guide_names.add(name.lower())
+                guides.append((name, _write_guide(
+                    course_title, chapter, plans,
+                    freepik_links=bool(provider.freepik_key and image_source in {"auto", "freepik"}),
+                )))
+            successful_chapters += 1
             if not plans:
                 warnings.append(f"{chapter.filename}: no eligible headings without an existing image were found.")
         except Exception as exc:
@@ -774,56 +779,36 @@ def build_course_image_package(
             if mode == "insert":
                 enhanced.append((f"{Path(chapter.filename).stem}_unchanged.docx", chapter.payload))
 
-    # A shared course cover is preferable when there are many chapters of one
-    # course; otherwise prepare one per separately titled chapter.
-    # In a multi-chapter course with no chapter-specific covers, create one
-    # shared course cover rather than repeating the same photo for each unit.
-    cover_targets = (
-        [course_title]
-        if course_name.strip() or len(chapters) == 1 or len(provided_covers) <= 1
-        else [chapter.title for chapter in chapters]
-    )
-    for i, title in enumerate(cover_targets):
-        supplied = None
-        if provided_covers:
-            if len(provided_covers) == 1:
-                supplied = provided_covers[0]
+    # Covers and guides are deliberately not generated during insertion: they
+    # are not part of the requested Word download and can incur API charges.
+    if mode == "guides":
+        # One shared course cover for one course, rather than duplicates.
+        cover_targets = (
+            [course_title]
+            if course_name.strip() or len(chapters) == 1 or len(provided_covers) <= 1
+            else [chapter.title for chapter in chapters]
+        )
+        for title in cover_targets:
+            supplied = None
+            if provided_covers:
+                if len(provided_covers) == 1:
+                    supplied = provided_covers[0]
+                else:
+                    supplied = next((item for item in provided_covers if _tokens(title)[-1:] and _tokens(title)[-1] in item[0].lower()), None)
+            cover, note = _cover_for_course(title, supplied, provider, generate=generate_missing)
+            if cover:
+                cover_assets.append((f"{_safe_name(title)}_cover.png", cover))
+                cover_sources.append({"cover": title, "source_note": note})
             else:
-                supplied = next((item for item in provided_covers if _tokens(title)[-1:] and _tokens(title)[-1] in item[0].lower()), None)
-        cover, note = _cover_for_course(title, supplied, provider, generate=generate_missing)
-        if cover:
-            cover_assets.append((f"{_safe_name(title)}_cover.png", cover))
-            cover_sources.append({"cover": title, "source_note": note})
-        else:
-            warnings.append(f"{title}: {note}")
+                warnings.append(f"{title}: {note}")
 
-    if not guides:
+    if not successful_chapters:
         raise CourseImagesError("None of the chapter documents could be read as Word files.")
-    out = BytesIO()
-    used_paths: set[str] = set()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
-        names = ("Matching Image Search Guides", "Cover Images")
-        if mode == "insert":
-            names += ("Word Documents With Images",)
-        for folder in names:
-            archive.writestr(folder + "/", b"")
-        for folder, items in (
-            ("Matching Image Search Guides", guides),
-            ("Cover Images", cover_assets),
-            ("Word Documents With Images", enhanced),
-        ):
-            for original_name, data in items:
-                name = _safe_name(original_name)
-                path = folder + "/" + name
-                number = 2
-                while path.lower() in used_paths:
-                    path = folder + "/" + f"{Path(name).stem}_{number}{Path(name).suffix}"
-                    number += 1
-                used_paths.add(path.lower())
-                archive.writestr(path, data)
     warnings.extend(provider.warnings)
     report = {
-        "chapters_processed": len(guides),
+        "chapters_processed": successful_chapters,
+        "guides_created": len(guides),
+        "documents_with_images": len(enhanced),
         "image_recommendations": total_recommended,
         "photos_inserted": photos_inserted,
         "covers_prepared": len(cover_assets),
@@ -839,6 +824,41 @@ def build_course_image_package(
             "openrouter": bool(provider.openrouter_key), "openai": bool(provider.openai_key),
         },
     }
+
+    # The ordinary path: one Word upload -> one Word download. Avoid forcing
+    # users to open a ZIP and hunt through extra guide/cover folders.
+    if mode == "insert" and Path(filename).suffix.lower() == ".docx":
+        report["output_format"] = "docx"
+        return CourseImagesResult(
+            filename=_safe_name(enhanced[0][0]),
+            payload=enhanced[0][1],
+            details=report,
+        )
+
+    out = BytesIO()
+    used_paths: set[str] = set()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        if mode == "insert":
+            # A batch ZIP contains only the edited DOCX files, at its root.
+            assets = [("", enhanced)]
+        else:
+            archive.writestr("Matching Image Search Guides/", b"")
+            archive.writestr("Cover Images/", b"")
+            assets = [
+                ("Matching Image Search Guides/", guides),
+                ("Cover Images/", cover_assets),
+            ]
+        for folder, items in assets:
+            for original_name, data in items:
+                name = _safe_name(original_name)
+                path = folder + name
+                number = 2
+                while path.lower() in used_paths:
+                    path = folder + f"{Path(name).stem}_{number}{Path(name).suffix}"
+                    number += 1
+                used_paths.add(path.lower())
+                archive.writestr(path, data)
+    report["output_format"] = "zip"
     return CourseImagesResult(
         filename=f"{_safe_name(course_title)}_Matching_Image_Guides_and_Covers.zip" if mode == "guides"
         else f"{_safe_name(course_title)}_Documents_With_Images.zip",

@@ -1887,13 +1887,22 @@ function CourseImagesPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [courseName, setCourseName] = useState("");
-  const [mode, setMode] = useState<"guides" | "insert">("guides");
+  const [mode, setMode] = useState<"guides" | "insert">("insert");
   const [imageSource, setImageSource] = useState<"auto" | "freepik" | "pexels" | "generate">("auto");
   const [generateMissing, setGenerateMissing] = useState(false);
   const [useOpenrouter, setUseOpenrouter] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
+
+  // Render these as visible radio cards rather than a browser-native <select>.
+  // Native dark-mode option menus appear grey or unreadable on some browsers.
+  const imageSources = [
+    { value: "auto", label: "Pexels, then Freepik", info: "Search both stock-photo libraries" },
+    { value: "freepik", label: "Freepik only", info: "Search Freepik stock photographs" },
+    { value: "pexels", label: "Pexels only", info: "Search Pexels stock photographs" },
+    { value: "generate", label: "Freepik AI generation", info: "Create new photographs for each selected heading" },
+  ] as const;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1909,7 +1918,7 @@ function CourseImagesPanel() {
       form.append("image_source", imageSource);
       form.append("generate_missing", String(generateMissing || imageSource === "generate"));
       form.append("use_openrouter", String(useOpenrouter));
-      if (coverFile) form.append("cover_image", coverFile);
+      if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
       const result = await apiRequest("/api/v1/course-images/prepare", {
         method: "POST",
         body: form,
@@ -1923,13 +1932,15 @@ function CourseImagesPanel() {
   }
 
   const details = job?.details;
+  const isSingleDocx = file?.name.toLowerCase().endsWith(".docx") ?? false;
+  const isWordOutput = job?.output_filename?.toLowerCase().endsWith(".docx") ?? false;
   return (
     <form className="panel-stack" onSubmit={submit}>
       <section className="hero compact">
         <div>
           <span className="eyebrow">SLC Course Image Workflow</span>
           <h2>Find &amp; Add Images</h2>
-          <p>Prepare heading-specific image search guides and course covers, or insert relevant photographs into unillustrated Word chapters.</p>
+          <p>Add suitable photographs beneath chapter headings and download the finished Word document.</p>
         </div>
         <div className="hero-badge">IMG</div>
       </section>
@@ -1957,33 +1968,24 @@ function CourseImagesPanel() {
               onChange={(event) => setCourseName(event.target.value)}
             />
           </label>
-          <FileField
-            label="Existing cover image (optional)"
-            accept=".png,.jpg,.jpeg,.webp"
-            onChange={(files) => { setCoverFile(files[0] || null); setJob(null); }}
-            help={coverFile?.name || "Colour-correct or reuse a supplied cover photo"}
-          />
+          {mode === "guides" && (
+            <FileField
+              label="Existing cover image (optional)"
+              accept=".png,.jpg,.jpeg,.webp"
+              onChange={(files) => { setCoverFile(files[0] || null); setJob(null); }}
+              help={coverFile?.name || "Colour-correct or reuse a supplied cover photo"}
+            />
+          )}
         </section>
 
         <section className="card">
           <div className="section-heading">
             <span>02</span>
             <div>
-              <h3>Choose image workflow</h3>
-              <p>Both modes use the supplied course subject and exact Word headings.</p>
+              <h3>Choose image settings</h3>
+              <p>Select where images come from. All four image-source options are shown below.</p>
             </div>
           </div>
-          <label className="toggle-row">
-            <input
-              type="radio" name="image-mode" value="guides"
-              checked={mode === "guides"}
-              onChange={() => { setMode("guides"); setJob(null); }}
-            />
-            <span>
-              <strong>Image search guides &amp; covers</strong>
-              <small>Recommend photographs for about 50% of eligible headings, with Pexels and StockSnap search links. Original DOCX files are not modified.</small>
-            </span>
-          </label>
           <label className="toggle-row">
             <input
               type="radio" name="image-mode" value="insert"
@@ -1991,22 +1993,44 @@ function CourseImagesPanel() {
               onChange={() => { setMode("insert"); setJob(null); }}
             />
             <span>
-              <strong>Automatically add images to Word</strong>
-              <small>Find licensed stock photographs using Pexels or Freepik, or generate relevant images with Freepik AI. Preserve lesson wording and styles.</small>
+              <strong>Add images to my Word document</strong>
+              <small>Download a finished Word file, or a ZIP of edited Word files for a batch upload.</small>
             </span>
           </label>
-          <label className="input-label">
-            Image source
-            <select
-              value={imageSource}
-              onChange={(event) => { setImageSource(event.target.value as typeof imageSource); setJob(null); }}
-            >
-              <option value="auto">Find stock: Pexels, then Freepik</option>
-              <option value="freepik">Find stock: Freepik only</option>
-              <option value="pexels">Find stock: Pexels only</option>
-              <option value="generate">Generate new images: Freepik AI</option>
-            </select>
+          <label className="toggle-row">
+            <input
+              type="radio" name="image-mode" value="guides"
+              checked={mode === "guides"}
+              onChange={() => { setMode("guides"); setJob(null); }}
+            />
+            <span>
+              <strong>Image guides &amp; covers (optional)</strong>
+              <small>Create a separate guide without editing the original document.</small>
+            </span>
           </label>
+          <fieldset className="image-source-fieldset">
+            <legend>Image source</legend>
+            <div className="image-source-options">
+              {imageSources.map((source) => (
+                <label
+                  className={`image-source-option ${imageSource === source.value ? "selected" : ""}`}
+                  key={source.value}
+                >
+                  <input
+                    type="radio"
+                    name="image-source"
+                    value={source.value}
+                    checked={imageSource === source.value}
+                    onChange={() => { setImageSource(source.value); setJob(null); }}
+                  />
+                  <span>
+                    <strong>{source.label}</strong>
+                    <small>{source.info}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           {imageSource !== "generate" && (
             <label className="toggle-row">
               <input
@@ -2029,47 +2053,31 @@ function CourseImagesPanel() {
               <small>Optional AI analysis of chapter headings and short passages for more specific searches and photo descriptions. Needs OPENROUTER_API_KEY on the backend.</small>
             </span>
           </label>
-          <p className="input-help">Freepik stock access uses FREEPIK_API_KEY (or MAGNIFIC_API_KEY). The generated-image option uses Freepik's Flux 2 Pro model, with optional OpenAI fallback. If no provider keys are configured, search guides still work.</p>
         </section>
       </div>
 
-      <section className="card compact-card">
-        <h3>What stays unchanged?</h3>
-        <p>Original lesson wording, headings, styles, numbering, tables and existing photographs are retained. Image placements exclude Summary, Conclusion, References, Bibliography and contents sections. Cover titles are left blank, with a charcoal panel and thin gold divider. Pexels and StockSnap search links remain in guides; when Freepik is configured, it is also linked. Freepik stock licences and attribution must be reviewed before publication. OpenRouter and Freepik calls may incur charges.</p>
-      </section>
-
       {error && <div className="error-box" role="alert">{error}</div>}
       <button type="submit" className="button primary large" disabled={!file || busy}>
-        {busy ? "Preparing images…" : mode === "guides" ? "Create image guides & covers" : "Find and insert images"}
+        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : "Add images to Word"}
       </button>
       {job && (
         <>
           <JobResult
             job={job}
-            title="Course image package ready"
-            downloadLabel="Download image package ZIP"
+            title={mode === "guides" ? "Image guides ready" : "Your document is ready"}
+            downloadLabel={mode === "guides" ? "Download guides ZIP" : isWordOutput ? "Download Word document" : "Download edited Word files ZIP"}
           />
-          <section className="card">
-            <h3>Image preparation summary</h3>
-            <div className="image-summary-grid">
-              <div><strong>{details?.chapters_processed ?? 0}</strong><span>Guides created</span></div>
-              <div><strong>{details?.image_recommendations ?? 0}</strong><span>Suggested placements</span></div>
-              <div><strong>{details?.photos_inserted ?? 0}</strong><span>Photos inserted</span></div>
-              <div><strong>{details?.covers_prepared ?? 0}</strong><span>Cover images</span></div>
-              <div><strong>{details?.openrouter_refined_sections ?? 0}</strong><span>OpenRouter suggestions</span></div>
-              <div><strong>{details?.generation_attempts ?? 0}</strong><span>Image generation attempts</span></div>
-            </div>
-            {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
-              <div className="image-warning-list">
-                <strong>Items needing attention</strong>
-                <ul>{details.warnings.map((message: string, i: number) => <li key={i}>{message}</li>)}</ul>
-              </div>
-            )}
-            {Array.isArray(details?.image_sources) && details.image_sources.some((item: any) => item.provider === "Freepik") && (
-              <p className="image-credit">Freepik stock photos are listed with source links and available licence information in the downloaded guides. Check the required attribution and usage rights.</p>
-            )}
-            <p className="image-credit">Search photographs via <a href="https://www.pexels.com/" target="_blank" rel="noreferrer">Pexels</a>, <a href="https://stocksnap.io/" target="_blank" rel="noreferrer">StockSnap</a> or <a href="https://www.freepik.com/" target="_blank" rel="noreferrer">Freepik</a>; verify every photo's licence and subject relevance before publication.</p>
-          </section>
+          <p className="image-completion-note">
+            {mode === "insert"
+              ? `${details?.photos_inserted ?? 0} image(s) added to ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP above."}`
+              : `${details?.guides_created ?? 0} guide(s) created.`}
+          </p>
+          {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
+            <details className="image-result-warnings">
+              <summary>Show {details.warnings.length} processing notice(s)</summary>
+              <ul>{details.warnings.map((message: string, i: number) => <li key={i}>{message}</li>)}</ul>
+            </details>
+          )}
         </>
       )}
     </form>

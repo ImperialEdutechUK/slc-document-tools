@@ -9,7 +9,16 @@ The existing Document Formatter, Word → PDF, PDF Editor and Replace PDF Cover 
 - You may optionally upload an existing cover photo. A single `cover` image found inside the ZIP is also recognised.
 - Assignment briefs and written assignment templates are skipped in course image preparation.
 
-## Mode 1: Image search guides & covers (default)
+## Mode 1: Automatically add images to Word (default in the website)
+
+- Select **Add images to my Word document** in the Find & Add Images tab (selected by default).
+- All image sources are permanently visible as four high-contrast cards: **Pexels, then Freepik**, **Freepik only**, **Pexels only**, or **Freepik AI generation**.
+- Uploading a **single `.docx`** returns that document with images inserted as a directly downloadable **`.docx`**, named `<original name>_with_images.docx`.
+- Uploading a **`.zip` of chapters** returns a ZIP containing **only the enhanced DOCX files**, at ZIP root. There are no extra guide folders, cover pictures or other assets to sift through.
+- An insertion job does **not** create image guides or generate covers, avoiding unused image-provider calls.
+- The result screen offers one clear download button; processing notices are collapsed by default.
+
+## Mode 2: Image search guides & covers (optional)
 
 - Creates **one Word image-search guide per eligible chapter**.
 - Selects approximately 50% of eligible Heading 1–6 paragraphs that do not already have an image below them.
@@ -20,16 +29,16 @@ The existing Document Formatter, Word → PDF, PDF Editor and Replace PDF Cover 
 - Does **not** change or include the original Word chapter files.
 - The result ZIP has only `Matching Image Search Guides/` and `Cover Images/`.
 
-## Mode 2: Automatically add images to Word
+### How automatic image insertion works
 
-- Uses the same heading analysis and guide creation.
+- Uses the same heading analysis as the guide mode but does not generate guides.
 - Choose **Find stock: Pexels, then Freepik** (automatic), **Freepik only**, **Pexels only** or **Generate new images** in the UI.
 - Pexels search uses its official API. Freepik search uses the official Freepik/Magnific stock-resource API and only considers photo resources with free/freemium metadata and no premium product flag. Only official licenced download URLs are used, never preview thumbnails. Freepik *freemium* does not mean unrestricted use: confirm licence and attribution requirements.
 - Search results must match specific meaningful heading terms; no unrelated filler photos are inserted. StockSnap remains search-link-only.
 - Prevents repeat use of the same Pexels or Freepik photograph across chapters in one job.
 - **Generate missing** (off by default) uses Freepik's Flux 2 Pro image model with optional direct OpenAI image fallback. **Generate new images** skips stock search and generates all requested placements. All generation is capped at `COURSE_IMAGE_MAX_GENERATIONS` attempts per job (default 8), to help control costs.
 - Inserts selected landscape photographs directly **below the intended heading**, without changing existing text, styles or tables. Page flow can change because pictures occupy space.
-- The ZIP additionally includes `Word Documents With Images/`.
+- The output contains only the finished Word document(s); single DOCX uploads are never wrapped in a ZIP.
 - Missing images are explicitly reported; unrelated images are not substituted.
 
 ## Deploying / using image providers
@@ -73,22 +82,12 @@ OPENAI_API_KEY=
 | `generate_missing` | boolean | No; default `false`; forced on when source is `generate` |
 | `cover_image` | PNG / JPEG / WebP | No |
 
-Returns the stored ZIP download URL and image counts, including which image sources were used, optional OpenRouter refinements, generation attempts and any warnings. These results are not a publishing/licensing clearance report.
+Returns a persisted job download URL with the correct `.docx` or `.zip` output type, image counts, image sources, optional OpenRouter refinements, generation attempts and warnings. These results are not a publishing/licensing clearance report.
 
 ## URL and usage safety
 
 Pexels photographs are requested from its official API and downloads are restricted to `https://images.pexels.com`. Freepik/Magnific photograph searches and licences are requested from the official resource API; signed image downloads are restricted to approved Freepik/Magnific CDN domains and are size-limited. StockSnap is not automatically downloaded. Stock photos and generated images should be checked for fitness, AI accuracy and licensing before educational publication. Search links do not guarantee availability or permissions. An OpenRouter key cannot replace an OpenAI image generation key.
 
-## API
+## Compatibility note
 
-`POST /api/v1/course-images/prepare` as `multipart/form-data`:
-
-| Field | Type | Required |
-|---|---|---|
-| `document` | `.docx` or `.zip` | Yes |
-| `course_name` | text | No |
-| `mode` | `guides` / `insert` | No; default `guides` |
-| `generate_missing` | boolean | No; default `true` |
-| `cover_image` | PNG / JPEG / WebP | No |
-
-Returns the standard persisted job response with the ZIP download URL and counts of guides, image placements, inserted photos, prepared covers and warnings.
+The API retains its previous default `mode=guides` for clients that omit the field; the website explicitly sends `mode=insert` by default. Existing clients requesting guides still get the guide-and-cover ZIP. Only insertion output packaging has changed.

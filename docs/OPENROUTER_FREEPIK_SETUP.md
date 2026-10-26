@@ -20,21 +20,23 @@ For a new **Magnific** account, use `MAGNIFIC_API_KEY` instead of `FREEPIK_API_K
 
 ## 2. How to use it
 
-Open **Find & Add Images** and upload one chapter `.docx` or a ZIP of chapters.
+Open **Find & Add Images** and upload one chapter `.docx` or a ZIP of chapters. **Add images to my Word document** is selected by default; no separate guide or cover is generated during insertion.
 
-- Choose **Image search guides & covers** to receive one clickable photo-search guide per chapter, without changing Word content. With Freepik enabled, the guides include Freepik links in addition to Pexels and StockSnap.
-- Choose **Automatically add images to Word** to insert relevant photographs below about half the eligible headings while preserving content and styles.
-- Under **Image source**, choose **Find stock: Freepik only** to download relevant licensed stock photos from Freepik/Magnific, **Find stock: Pexels, then Freepik** to try available stock sources in order, or **Generate new images: Freepik AI** to create a unique photo for each placement.
+- Choose **Add images to my Word document** to insert relevant photographs below about half the eligible headings while preserving content and styles.
+- Choose **Image guides & covers (optional)** to receive one clickable photo-search guide per chapter instead of changing Word content. With Freepik enabled, guides include Freepik links in addition to Pexels and StockSnap.
+- The **Image source** selection has four always-visible cards: **Pexels, then Freepik**, **Freepik only**, **Pexels only** and **Freepik AI generation**. Click the card you want; there is no hard-to-read dropdown.
 - Enable **Use OpenRouter to improve image search ideas** only if AI text refinement is desired; it may incur model charges and sends headings plus short text excerpts to the external API.
 - Enable **Generate only when no matching stock photo is found** if new images are allowed as a fallback. This defaults **off**. Generation is limited to 8 attempts per job by default, even if more headings qualify.
 
 ## 3. What the result contains
 
-Guide-only ZIP: `Matching Image Search Guides/` and `Cover Images/`.
+**Single DOCX input, insertion mode:** one enhanced Word document (`..._with_images.docx`) ready to download directly. No ZIP is created.
 
-Insert-mode ZIP: the two folders above plus `Word Documents With Images/`.
+**ZIP input, insertion mode:** a ZIP containing only enhanced Word documents at its root (no guide or cover folders).
 
-The results screen reports chapter counts, photo placements, generation attempts, OpenRouter suggestions, warnings and stock-image source information. Freepik photo source links and licence metadata are included in the individual guides when a Freepik photo was inserted.
+**Guide-only mode:** a ZIP with `Matching Image Search Guides/` and `Cover Images/`.
+
+The results screen shows the download button, an inserted-image count and collapsible processing notices. Image-source and provider metadata remain available in the backend job response. Guide mode includes searchable Freepik source links where configured.
 
 ## 4. Important limits
 
