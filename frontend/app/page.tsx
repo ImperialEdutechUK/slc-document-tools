@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 
-type Tab = "formatter" | "word-pdf" | "pdf-editor" | "pdf-replace";
+type Tab = "formatter" | "course-images" | "word-pdf" | "pdf-editor" | "pdf-replace";
 
 type JobResponse = {
   id: string;
@@ -1879,6 +1879,169 @@ function FormatterPanel() {
    WORD TO PDF
 ------------------------------------------------------- */
 
+/* -------------------------------------------------------
+   IMAGE FINDER, SEARCH GUIDES AND COURSE COVERS
+------------------------------------------------------- */
+
+function CourseImagesPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [courseName, setCourseName] = useState("");
+  const [mode, setMode] = useState<"guides" | "insert">("guides");
+  const [generateMissing, setGenerateMissing] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!file || busy) return;
+    setBusy(true);
+    setError("");
+    setJob(null);
+    try {
+      const form = new FormData();
+      form.append("document", file);
+      form.append("course_name", courseName);
+      form.append("mode", mode);
+      form.append("generate_missing", String(generateMissing));
+      if (coverFile) form.append("cover_image", coverFile);
+      const result = await apiRequest("/api/v1/course-images/prepare", {
+        method: "POST",
+        body: form,
+      });
+      setJob(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Image preparation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const details = job?.details;
+  return (
+    <form className="panel-stack" onSubmit={submit}>
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">SLC Course Image Workflow</span>
+          <h2>Find &amp; Add Images</h2>
+          <p>Prepare heading-specific image search guides and course covers, or insert relevant photographs into unillustrated Word chapters.</p>
+        </div>
+        <div className="hero-badge">IMG</div>
+      </section>
+
+      <div className="two-column">
+        <section className="card">
+          <div className="section-heading">
+            <span>01</span>
+            <div>
+              <h3>Upload documents</h3>
+              <p>One Word chapter or a ZIP of chapter documents.</p>
+            </div>
+          </div>
+          <FileField
+            label="Course DOCX / ZIP"
+            accept=".docx,.zip"
+            onChange={(files) => { setFile(files[0] || null); setJob(null); }}
+            help={file?.name || "DOCX or ZIP containing DOCX files"}
+          />
+          <label className="input-label">
+            Course / Module Title
+            <input
+              value={courseName}
+              placeholder="Optional – otherwise use uploaded file names"
+              onChange={(event) => setCourseName(event.target.value)}
+            />
+          </label>
+          <FileField
+            label="Existing cover image (optional)"
+            accept=".png,.jpg,.jpeg,.webp"
+            onChange={(files) => { setCoverFile(files[0] || null); setJob(null); }}
+            help={coverFile?.name || "Colour-correct or reuse a supplied cover photo"}
+          />
+        </section>
+
+        <section className="card">
+          <div className="section-heading">
+            <span>02</span>
+            <div>
+              <h3>Choose image workflow</h3>
+              <p>Both modes use the supplied course subject and exact Word headings.</p>
+            </div>
+          </div>
+          <label className="toggle-row">
+            <input
+              type="radio" name="image-mode" value="guides"
+              checked={mode === "guides"}
+              onChange={() => { setMode("guides"); setJob(null); }}
+            />
+            <span>
+              <strong>Image search guides &amp; covers</strong>
+              <small>Recommend photographs for about 50% of eligible headings, with Pexels and StockSnap search links. Original DOCX files are not modified.</small>
+            </span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="radio" name="image-mode" value="insert"
+              checked={mode === "insert"}
+              onChange={() => { setMode("insert"); setJob(null); }}
+            />
+            <span>
+              <strong>Automatically add images to Word</strong>
+              <small>Search Pexels and insert relevant landscape photos below selected headings. Generate missing photos if enabled, without rewriting lesson text.</small>
+            </span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox" checked={generateMissing}
+              onChange={(event) => setGenerateMissing(event.target.checked)}
+            />
+            <span>
+              <strong>Generate images when stock search has no suitable match</strong>
+              <small>Requires the server-side OpenAI image API key. Stock-photo downloads require a Pexels API key. Without keys, search guides still work.</small>
+            </span>
+          </label>
+        </section>
+      </div>
+
+      <section className="card compact-card">
+        <h3>What stays unchanged?</h3>
+        <p>Original lesson wording, headings, styles, numbering, tables and existing photographs are retained. Image placements exclude Summary, Conclusion, References, Bibliography and contents sections. Cover titles are left blank, with a charcoal panel and thin gold divider. StockSnap is offered as a search link, not an unlicensed automatic download.</p>
+      </section>
+
+      {error && <div className="error-box" role="alert">{error}</div>}
+      <button type="submit" className="button primary large" disabled={!file || busy}>
+        {busy ? "Preparing images…" : mode === "guides" ? "Create image guides & covers" : "Find and insert images"}
+      </button>
+      {job && (
+        <>
+          <JobResult
+            job={job}
+            title="Course image package ready"
+            downloadLabel="Download image package ZIP"
+          />
+          <section className="card">
+            <h3>Image preparation summary</h3>
+            <div className="image-summary-grid">
+              <div><strong>{details?.chapters_processed ?? 0}</strong><span>Guides created</span></div>
+              <div><strong>{details?.image_recommendations ?? 0}</strong><span>Suggested placements</span></div>
+              <div><strong>{details?.photos_inserted ?? 0}</strong><span>Photos inserted</span></div>
+              <div><strong>{details?.covers_prepared ?? 0}</strong><span>Cover images</span></div>
+            </div>
+            {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
+              <div className="image-warning-list">
+                <strong>Items needing attention</strong>
+                <ul>{details.warnings.map((message: string, i: number) => <li key={i}>{message}</li>)}</ul>
+              </div>
+            )}
+            <p className="image-credit">Search photographs via <a href="https://www.pexels.com/" target="_blank" rel="noreferrer">Pexels</a> or <a href="https://stocksnap.io/" target="_blank" rel="noreferrer">StockSnap</a>; verify each photo is suitable before publication.</p>
+          </section>
+        </>
+      )}
+    </form>
+  );
+}
+
 function WordPdfPanel() {
   const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2492,6 +2655,14 @@ export default function Home() {
 
           <button
             type="button"
+            className={tab === "course-images" ? "active" : ""}
+            onClick={() => setTab("course-images")}
+          >
+            Find &amp; Add Images
+          </button>
+
+          <button
+            type="button"
             className={tab === "word-pdf" ? "active" : ""}
             onClick={() => setTab("word-pdf")}
           >
@@ -2516,6 +2687,7 @@ export default function Home() {
         </nav>
 
         {tab === "formatter" && <FormatterPanel />}
+        {tab === "course-images" && <CourseImagesPanel />}
         {tab === "word-pdf" && <WordPdfPanel />}
         {tab === "pdf-editor" && <PdfEditorPanel />}
         {tab === "pdf-replace" && <PdfCoverPanel />}

@@ -18,6 +18,7 @@ load_dotenv()
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
@@ -47,13 +48,14 @@ from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, StorageNotFoundError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
+from .services.course_images import CourseImagesError, build_course_image_package
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.22-v16-storage-diagnostics"
+BUILD_VERSION = "2026.10.26-v17-course-images"
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title=APP_NAME, version="0.5.0")
+app = FastAPI(title=APP_NAME, version="0.6.0")
 
 origins = [
     item.strip()
@@ -320,6 +322,59 @@ async def format_document_batch(
         logger.exception("Batch formatting failed for job %s", job.id)
         _fail_job(db, job, exc)
         raise HTTPException(status_code=500, detail="Batch formatting failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/course-images/prepare", response_model=JobResponse)
+async def prepare_course_images(
+    document: Annotated[UploadFile, File(...)],
+    course_name: Annotated[str, Form()] = "",
+    mode: Annotated[str, Form()] = "guides",
+    generate_missing: Annotated[bool, Form()] = True,
+    cover_image: Annotated[UploadFile | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    """Plan heading imagery and course covers; optionally insert sourced photos."""
+    filename = document.filename or "course.zip"
+    if Path(filename).suffix.lower() not in {".docx", ".zip"}:
+        raise HTTPException(status_code=400, detail="Upload one DOCX or a ZIP of chapters.")
+    if mode not in {"guides", "insert"}:
+        raise HTTPException(status_code=400, detail="Invalid image workflow mode.")
+    job = _new_job(db, "course_images_" + mode, filename)
+    try:
+        source_bytes = await document.read()
+        if len(source_bytes) > 90 * 1024 * 1024:
+            raise CourseImagesError("Upload exceeds the 90 MB limit.")
+        cover_bytes = await cover_image.read() if cover_image else None
+        result = await run_in_threadpool(
+            build_course_image_package,
+            source_bytes, filename,
+            course_name=course_name,
+            mode=mode,
+            generate_missing=generate_missing,
+            cover_upload=cover_bytes,
+        )
+        result.details["build"] = BUILD_VERSION
+        output_key = f"jobs/{job.id}/{result.filename}"
+        storage.put_bytes(output_key, result.payload, "application/zip")
+        job = _complete_job(
+            db, job,
+            output_filename=result.filename,
+            output_key=output_key,
+            details=result.details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except CourseImagesError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Course image job failed: %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(
+            status_code=500, detail="Image preparation failed. Check the backend log for details."
+        ) from exc
 
 
 @app.post(f"{API_PREFIX}/word-to-pdf", response_model=JobResponse)

@@ -1800,3 +1800,33 @@ a {
   padding: 2px 9px;
   white-space: nowrap;
 }
+
+/* -------------------------------------------------------
+   COURSE IMAGE RECOMMENDATIONS
+------------------------------------------------------- */
+.image-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 17px 0;
+}
+.image-summary-grid > div {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: rgba(5, 17, 31, 0.45);
+}
+.image-summary-grid strong { color: var(--teal-bright); font-size: 25px; }
+.image-summary-grid span { color: var(--muted); font-size: 12px; }
+.image-warning-list { color: var(--warning); margin-top: 13px; }
+.image-warning-list ul { padding-left: 22px; line-height: 1.6; color: var(--muted); }
+.image-credit { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.image-credit a { color: var(--teal-bright); }
+@media (max-width: 650px) {
+  .image-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tabs { display: flex; overflow-x: auto; max-width: 100%; }
+  .tabs button { white-space: nowrap; }
+}

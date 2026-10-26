@@ -26,3 +26,9 @@ storage/
 Thumbs.db
 .vscode/
 .idea/
+
+# Sensitive browser authentication sessions (never commit to the project)
+freepik_storage_state.json
+*_storage_state.json
+# Generated TS cache
+*.tsbuildinfo

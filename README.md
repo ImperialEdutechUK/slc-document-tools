@@ -25,7 +25,22 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - DOCX or ZIP input from the same formatter screen.
 - Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
-### ZIP batch formatting
+### Find & Add Images — new option
+
+A dedicated **Find & Add Images** tab now supports chapters with no existing photographs. It follows the uploaded course-image master prompt (see `docs/COURSE_IMAGE_MASTER_PROMPT.txt`). Upload a DOCX or ZIP of chapters and choose:
+
+- **Image search guides & covers:** creates one DOCX guide per chapter with relevant photograph descriptions, precise heading-based placements, clickable Pexels/StockSnap searches and (when a photo source is available) a course cover with a blank charcoal lower panel and gold separator. It never modifies lesson documents and the output ZIP has only `Matching Image Search Guides/` and `Cover Images/`.
+- **Automatically add images to Word:** downloads relevant Pexels photographs or optionally generates missing images, inserts them beneath about 50% of eligible headings, and additionally returns `Word Documents With Images/`. Original wording and formatting are preserved, although inserting photographs can change page flow.
+
+Summary/Conclusion/References/Contents headings are excluded; repeated stock photos are avoided. Without image provider keys, the guide-only workflow still functions, but auto-insertion and new photographic covers require configuration.
+
+Backend environment variables: `PEXELS_API_KEY` for free Pexels stock downloads and optionally `OPENAI_API_KEY` for generated images (`OPENAI_IMAGE_MODEL=gpt-image-2.5-flare`). Credentials remain server-side; no external AI provider runs without the appropriate key. AI generation may incur API charges.
+
+For security and licensing, this deliverable omits any browser-session authentication tokens and proprietary font binaries from the uploaded project. Deploy approved, licensed Garamond font files privately to `backend/fonts/` where required by existing PDF conversion.
+
+Read `docs/COURSE_IMAGES_WORKFLOW.md` for complete instructions and API details.
+
+## ZIP batch formatting
 
 The formatter can now process a ZIP of course documents in one job:
 
@@ -152,7 +167,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.09.14-v9-single-line-footer`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.10.26-v17-course-images`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -206,6 +221,7 @@ Direct public image URLs work independently of the stock API.
 ```text
 POST /api/v1/formatter/format
 POST /api/v1/formatter/batch
+POST /api/v1/course-images/prepare
 POST /api/v1/word-to-pdf
 GET  /api/v1/jobs/{job_id}/preview
 GET  /api/v1/jobs/{job_id}/editable-paragraphs
@@ -230,7 +246,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **84 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
+The backend currently has **100 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
 
 ## Next implementation step
 
