@@ -997,7 +997,7 @@ function FormatterPanel() {
                 setImages([]);
               }
             }}
-            help={document?.name || "DOCX or ZIP containing DOCX files"}
+            help={document?.name || "Choose a .docx file or .zip containing Word (.docx) chapters"}
           />
 
           <FileField
@@ -1950,14 +1950,14 @@ function CourseImagesPanel() {
             <span>01</span>
             <div>
               <h3>Upload documents</h3>
-              <p>One Word chapter or a ZIP of chapter documents.</p>
+              <p>Upload one Word document or a ZIP containing multiple Word chapters. ZIP uploads are processed in a batch and returned as a ZIP.</p>
             </div>
           </div>
           <FileField
             label="Course DOCX / ZIP"
             accept=".docx,.zip"
             onChange={(files) => { setFile(files[0] || null); setJob(null); }}
-            help={file?.name || "DOCX or ZIP containing DOCX files"}
+            help={file?.name || "Choose a .docx file or .zip containing Word (.docx) chapters"}
           />
           <label className="input-label">
             Course / Module Title
@@ -1982,7 +1982,7 @@ function CourseImagesPanel() {
             <span>02</span>
             <div>
               <h3>Choose image settings</h3>
-              <p>Select where images come from. All four image-source options are shown below.</p>
+              <p>Choose a stock photo source. AI image generation is disabled.</p>
             </div>
           </div>
           <label className="toggle-row">
@@ -2045,7 +2045,7 @@ function CourseImagesPanel() {
 
       {error && <div className="error-box" role="alert">{error}</div>}
       <button type="submit" className="button primary large" disabled={!file || busy}>
-        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : "Add images to Word"}
+        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : "file?.name.toLowerCase().endsWith(".zip") ? "Add images to ZIP chapters" : "Add images to Word"}
       </button>
       {job && (
         <>
