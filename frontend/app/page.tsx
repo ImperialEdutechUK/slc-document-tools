@@ -1901,7 +1901,6 @@ function CourseImagesPanel() {
     { value: "auto", label: "Pexels, then Freepik", info: "Search both stock-photo libraries" },
     { value: "freepik", label: "Freepik only", info: "Search Freepik stock photographs" },
     { value: "pexels", label: "Pexels only", info: "Search Pexels stock photographs" },
-    { value: "generate", label: "Freepik AI generation", info: "Create new photographs for each selected heading" },
   ] as const;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1916,7 +1915,7 @@ function CourseImagesPanel() {
       form.append("course_name", courseName);
       form.append("mode", mode);
       form.append("image_source", imageSource);
-      form.append("generate_missing", String(generateMissing || imageSource === "generate"));
+      form.append("generate_missing", "false");
       form.append("use_openrouter", String(useOpenrouter));
       if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
       const result = await apiRequest("/api/v1/course-images/prepare", {
@@ -2031,18 +2030,6 @@ function CourseImagesPanel() {
               ))}
             </div>
           </fieldset>
-          {imageSource !== "generate" && (
-            <label className="toggle-row">
-              <input
-                type="checkbox" checked={generateMissing}
-                onChange={(event) => { setGenerateMissing(event.target.checked); setJob(null); }}
-              />
-              <span>
-                <strong>Generate only when no matching stock photo is found</strong>
-                <small>Optional; uses Freepik AI or an OpenAI image API key. Image generation uses provider credits and has a configurable job limit.</small>
-              </span>
-            </label>
-          )}
           <label className="toggle-row">
             <input
               type="checkbox" checked={useOpenrouter}

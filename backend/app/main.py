@@ -343,6 +343,9 @@ async def prepare_course_images(
         raise HTTPException(status_code=400, detail="Invalid image workflow mode.")
     if image_source not in {"auto", "pexels", "freepik", "generate"}:
         raise HTTPException(status_code=400, detail="Invalid image source selection.")
+    if image_source == "generate":
+        raise HTTPException(status_code=400, detail="AI image generation is disabled. Choose a stock image source.")
+    generate_missing = False
     job = _new_job(db, "course_images_" + mode, filename)
     try:
         source_bytes = await document.read()

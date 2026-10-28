@@ -164,33 +164,7 @@ class Provider:
                     return Picture(raw, "Freepik", page, identifier, licence, author)
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Freepik stock lookup was unsuccessful: {type(exc).__name__}.")
-        if (generate or self.stock_source == "generate") and (self.freepik_key or self.openai_key):
-            if self.generations_used >= self.max_generations:
-                message = f"Generation limit of {self.max_generations} images reached; missing images were not fabricated."
-                if message not in self.warnings:
-                    self.warnings.append(message)
-                return None
-            self.generations_used += 1  # count attempts, not only successful paid generations
-            if self.freepik_key:
-                try:
-                    scene = (
-                        "Professional candid ultra-photorealistic educational stock photo. "
-                        "Natural lighting, plausible people and equipment, realistic environment, "
-                        "no text, logos, labels, watermarks, or legible personal data. "
-                        + (prompt or query)[:1900]
-                    )
-                    payload = self._freepik().generate_photo(
-                        scene, portrait=portrait, model=self.freepik_model,
-                        normalise=lambda raw: _normalised_image(raw, portrait=portrait),
-                    )
-                    return Picture(payload, "Freepik AI-generated")
-                except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
-                    self.warnings.append(f"Freepik generation was unsuccessful: {type(exc).__name__}.")
-            if self.openai_key:
-                try:
-                    return self._generate(prompt or query, portrait=portrait)
-                except (httpx.HTTPError, ValueError, OSError, KeyError) as exc:
-                    self.warnings.append(f"OpenAI generation was unsuccessful: {type(exc).__name__}.")
+        # AI image generation disabled. Stock searches only; no generation API calls.
         return None
 
     def refine_plans(self, course: str, chapter: str, plans: list[ImagePlan]) -> None:
@@ -708,7 +682,8 @@ def build_course_image_package(
     provider = provider if provider is not None else Provider()
     provider.stock_source = image_source
     if image_source == "generate":
-        generate_missing = True
+        raise CourseImagesError("AI image generation is currently disabled. Select a stock photo source.")
+    generate_missing = False
     if mode == "insert" and not provider.can_acquire(generate=generate_missing):
         raise CourseImagesError(
             "No compatible image provider is configured. Configure FREEPIK_API_KEY "
