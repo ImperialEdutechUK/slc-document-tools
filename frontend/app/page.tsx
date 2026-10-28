@@ -2045,7 +2045,7 @@ function CourseImagesPanel() {
 
       {error && <div className="error-box" role="alert">{error}</div>}
       <button type="submit" className="button primary large" disabled={!file || busy}>
-        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : "file?.name.toLowerCase().endsWith(".zip") ? "Add images to ZIP chapters" : "Add images to Word"}
+        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : file?.name.toLowerCase().endsWith(".zip") ? "Add images to ZIP chapters" : "Add images to Word"}
       </button>
       {job && (
         <>
