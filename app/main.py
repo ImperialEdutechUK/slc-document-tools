@@ -1,0 +1,1180 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import logging
+import mimetypes
+import os
+from pathlib import Path
+from typing import Annotated
+from uuid import uuid4
+
+from dotenv import load_dotenv
+
+# Load backend/.env during local development. Railway environment variables
+# still take precedence because python-dotenv does not override them by default.
+load_dotenv()
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
+
+from .database import Base, engine, get_db
+from .formatter.engine import process
+from .formatter.pdf_editing import (
+    PdfEditingError,
+    get_pdf_page_count,
+    remove_pdf_pages,
+    replace_pdf_cover_and_text,
+    replace_pdf_cover_with_three_lines,
+)
+from .formatter.simple_editing import (
+    SimpleEditingError,
+    apply_simple_edits,
+    check_page_spacing,
+    clean_page_spacing,
+    edit_footer,
+    get_editable_paragraphs,
+    get_footer_settings,
+    regenerate_toc,
+    replace_paragraph_text,
+)
+from .models import Job
+from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest
+from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
+from .services.linked_images import LinkedImageResult, download_linked_images
+from .services.batch_formatter import BatchFormatterError, format_zip_batch
+from .services.storage import StorageError, StorageNotFoundError, storage
+from .services.word_to_pdf import WordToPdfError, convert_word_files
+from .services.course_images import CourseImagesError, build_course_image_package
+
+APP_NAME = "SLC Document Tools API"
+API_PREFIX = "/api/v1"
+BUILD_VERSION = "2026.10.26-v19-direct-word-download-visible-image-options"
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title=APP_NAME, version="0.6.0")
+
+origins = [
+    item.strip()
+    for item in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if item.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def create_tables() -> None:
+    Base.metadata.create_all(bind=engine)
+
+
+def _storage_http_error(exc: StorageError) -> HTTPException:
+    """Return 404 for missing files; 503 when the storage service is broken."""
+    return HTTPException(
+        status_code=404 if isinstance(exc, StorageNotFoundError) else 503,
+        detail=str(exc),
+    )
+
+
+def _safe_stem(filename: str | None, fallback: str = "document") -> str:
+    stem = Path(filename or fallback).stem.strip() or fallback
+    return "".join(char if char.isalnum() or char in {"-", "_", " "} else "_" for char in stem)[:160]
+
+
+def _job_response(job: Job, include_report: bool = True) -> JobResponse:
+    details = {}
+    if job.meta_json:
+        try:
+            details = json.loads(job.meta_json)
+        except json.JSONDecodeError:
+            details = {}
+
+    report = None
+    if include_report and job.report_key:
+        try:
+            report = storage.get_bytes(job.report_key).decode("utf-8", errors="replace")
+        except StorageError:
+            report = None
+
+    return JobResponse(
+        id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        original_filename=job.original_filename,
+        output_filename=job.output_filename,
+        download_url=f"{API_PREFIX}/jobs/{job.id}/download" if job.output_key else None,
+        report_url=f"{API_PREFIX}/jobs/{job.id}/report" if job.report_key else None,
+        report=report,
+        details=details,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        completed_at=job.completed_at,
+    )
+
+
+def _new_job(db: Session, job_type: str, original_filename: str | None) -> Job:
+    job = Job(
+        id=str(uuid4()),
+        job_type=job_type,
+        status="processing",
+        original_filename=original_filename,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def _complete_job(
+    db: Session,
+    job: Job,
+    *,
+    output_filename: str,
+    output_key: str,
+    report_key: str | None = None,
+    details: dict | None = None,
+) -> Job:
+    job.status = "completed"
+    job.output_filename = output_filename
+    job.output_key = output_key
+    job.report_key = report_key
+    job.meta_json = json.dumps(details or {}, ensure_ascii=False)
+    job.completed_at = datetime.now(timezone.utc)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def _fail_job(db: Session, job: Job, exc: Exception) -> None:
+    job.status = "failed"
+    job.error_message = str(exc)
+    job.completed_at = datetime.now(timezone.utc)
+    db.add(job)
+    db.commit()
+
+
+def _linked_report_text(link_result: LinkedImageResult) -> str:
+    if not link_result.entries and not link_result.warnings:
+        return ""
+    lines = ["", "Linked image retrieval", "----------------------"]
+    for entry in link_result.entries:
+        label = {
+            "downloaded": "OK",
+            "failed": "FAILED",
+            "manual_override": "MANUAL OVERRIDE",
+        }.get(entry.status, entry.status.upper())
+        line = f"Image {entry.number}: {label} - {entry.source_type} - {entry.url}"
+        if entry.message:
+            line += f" ({entry.message})"
+        lines.append(line)
+    for warning in link_result.warnings:
+        lines.append(f"Warning: {warning}")
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": APP_NAME, "build": BUILD_VERSION}
+
+
+@app.post(f"{API_PREFIX}/formatter/format", response_model=JobResponse)
+async def format_document(
+    document: Annotated[UploadFile, File(...)],
+    awarding_body: Annotated[str, Form()] = "",
+    course_name: Annotated[str, Form()] = "",
+    chapter: Annotated[str, Form()] = "",
+    auto_download_links: Annotated[bool, Form()] = True,
+    cover_image: Annotated[UploadFile | None, File()] = None,
+    images: Annotated[list[UploadFile] | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(document.filename or "").suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Upload a DOCX document to format.")
+
+    job = _new_job(db, "format", document.filename)
+    try:
+        document_bytes = await document.read()
+        manual_items: list[tuple[str, bytes]] = []
+        for image in images or []:
+            manual_items.append((image.filename or "image", await image.read()))
+
+        linked_result = LinkedImageResult()
+        if auto_download_links:
+            linked_result = download_linked_images(document_bytes, manual_items)
+
+        cover_bytes = await cover_image.read() if cover_image else None
+        cover_ext = Path(cover_image.filename or "cover.jpg").suffix.lstrip(".") if cover_image else "jpg"
+        all_image_items = linked_result.items + manual_items
+
+        result_bytes, log, validation_text, placement_report, image_catalog = process(
+            document_bytes,
+            cover_bytes,
+            cover_ext,
+            awarding_body,
+            course_name,
+            chapter,
+            all_image_items,
+        )
+        validation_text += _linked_report_text(linked_result)
+
+        stem = _safe_stem(document.filename)
+        output_filename = f"{stem}_SLC_formatted.docx"
+        output_key = f"jobs/{job.id}/{output_filename}"
+        report_key = f"jobs/{job.id}/{stem}_validation_report.txt"
+        storage.put_bytes(
+            output_key,
+            result_bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        storage.put_bytes(report_key, validation_text.encode("utf-8"), "text/plain; charset=utf-8")
+
+        details = {
+            "build": BUILD_VERSION,
+            "log": log,
+            "images": {
+                "placeholders": placement_report.total_placeholders,
+                "inserted": placement_report.images_inserted,
+                "missing": list(placement_report.missing_numbers),
+                "unused": list(placement_report.unused_uploaded_images),
+                "duplicates": image_catalog.duplicate_image_numbers,
+            },
+            "linked_images": linked_result.to_dict(),
+        }
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=report_key,
+            details=details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Document formatting failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/formatter/batch", response_model=JobResponse)
+async def format_document_batch(
+    document: Annotated[UploadFile, File(...)],
+    awarding_body: Annotated[str, Form()] = "",
+    course_name: Annotated[str, Form()] = "",
+    auto_download_links: Annotated[bool, Form()] = True,
+    cover_image: Annotated[UploadFile | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(document.filename or "").suffix.lower() != ".zip":
+        raise HTTPException(status_code=400, detail="Upload a ZIP containing DOCX documents.")
+
+    job = _new_job(db, "format_batch", document.filename)
+    try:
+        zip_bytes = await document.read()
+        cover_bytes = await cover_image.read() if cover_image else None
+        cover_ext = (
+            Path(cover_image.filename or "cover.jpg").suffix.lstrip(".")
+            if cover_image
+            else "jpg"
+        )
+
+        result = format_zip_batch(
+            zip_bytes,
+            zip_filename=document.filename or "Course.zip",
+            awarding_body=awarding_body,
+            course_name=course_name,
+            auto_download_links=auto_download_links,
+            cover_bytes=cover_bytes,
+            cover_ext=cover_ext,
+        )
+
+        result.details["build"] = BUILD_VERSION
+        output_key = f"jobs/{job.id}/{result.output_filename}"
+        storage.put_bytes(output_key, result.payload, "application/zip")
+
+        job = _complete_job(
+            db,
+            job,
+            output_filename=result.output_filename,
+            output_key=output_key,
+            report_key=None,
+            details=result.details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except BatchFormatterError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Batch formatting failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="Batch formatting failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/course-images/prepare", response_model=JobResponse)
+async def prepare_course_images(
+    document: Annotated[UploadFile, File(...)],
+    course_name: Annotated[str, Form()] = "",
+    mode: Annotated[str, Form()] = "guides",
+    generate_missing: Annotated[bool, Form()] = False,
+    image_source: Annotated[str, Form()] = "auto",
+    max_ai_generations: Annotated[int, Form()] = 0,
+    use_openrouter: Annotated[bool, Form()] = False,
+    cover_image: Annotated[UploadFile | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    """Plan heading imagery and course covers; optionally insert sourced photos."""
+    filename = document.filename or "course.zip"
+    if Path(filename).suffix.lower() not in {".docx", ".zip"}:
+        raise HTTPException(status_code=400, detail="Upload one DOCX or a ZIP of chapters.")
+    if mode not in {"guides", "insert"}:
+        raise HTTPException(status_code=400, detail="Invalid image workflow mode.")
+    if image_source not in {"auto", "pexels", "freepik", "generate", "commons", "smart"}:
+        raise HTTPException(status_code=400, detail="Invalid image source selection.")
+    if not 0 <= max_ai_generations <= 5:
+        raise HTTPException(status_code=400, detail="Freepik generation limit must be between 0 and 5.")
+    if image_source == "generate" and (not generate_missing or not max_ai_generations):
+        raise HTTPException(status_code=400, detail="Enable paid generation and set a limit to use Freepik generation.")
+    job = _new_job(db, "course_images_" + mode, filename)
+    try:
+        source_bytes = await document.read()
+        if len(source_bytes) > 90 * 1024 * 1024:
+            raise CourseImagesError("Upload exceeds the 90 MB limit.")
+        cover_bytes = await cover_image.read() if cover_image else None
+        result = await run_in_threadpool(
+            build_course_image_package,
+            source_bytes, filename,
+            course_name=course_name,
+            mode=mode,
+            generate_missing=generate_missing,
+            cover_upload=cover_bytes,
+            image_source=image_source,
+            use_openrouter=use_openrouter,
+            max_ai_generations=max_ai_generations,
+        )
+        result.details["build"] = BUILD_VERSION
+        output_key = f"jobs/{job.id}/{result.filename}"
+        content_type = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if result.filename.lower().endswith(".docx")
+            else "application/zip"
+        )
+        storage.put_bytes(output_key, result.payload, content_type)
+        job = _complete_job(
+            db, job,
+            output_filename=result.filename,
+            output_key=output_key,
+            details=result.details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except CourseImagesError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Course image job failed: %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(
+            status_code=500, detail="Image preparation failed. Check the backend log for details."
+        ) from exc
+
+
+@app.post(f"{API_PREFIX}/word-to-pdf", response_model=JobResponse)
+async def word_to_pdf(
+    files: Annotated[list[UploadFile], File(...)],
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one DOCX file or ZIP.")
+    original_name = files[0].filename if len(files) == 1 else f"{len(files)} uploaded files"
+    job = _new_job(db, "word_to_pdf", original_name)
+    try:
+        items = [(item.filename or "document.docx", await item.read()) for item in files]
+        output_filename, payload, content_type, details = convert_word_files(items)
+        details["build"] = BUILD_VERSION
+        output_key = f"jobs/{job.id}/{output_filename}"
+        storage.put_bytes(output_key, payload, content_type)
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except WordToPdfError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Word to PDF conversion failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="Word to PDF conversion failed. Check backend logs for the underlying error.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/preview")
+def preview_formatted_job(job_id: str, db: Session = Depends(get_db)) -> Response:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Preview is available for formatted DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        output_filename, pdf_payload, content_type, _details = convert_word_files(
+            [(source_job.output_filename, source_payload)]
+        )
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except WordToPdfError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return Response(
+        content=pdf_payload,
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{output_filename}"'},
+    )
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/editable-paragraphs")
+def editable_paragraphs(job_id: str, db: Session = Depends(get_db)) -> dict:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Simple editing is available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        paragraphs = get_editable_paragraphs(source_payload)
+        return {"job_id": source_job.id, "paragraphs": paragraphs}
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/simple-edit", response_model=JobResponse)
+def simple_edit_formatted_job(
+    job_id: str,
+    request: SimpleEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Simple editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "simple_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = apply_simple_edits(
+            source_payload, request.paragraph_indices, request.action
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["simple_edit"] = {
+            "action": request.action,
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Simple document editing failed.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/footer-settings")
+def footer_settings(job_id: str, db: Session = Depends(get_db)) -> dict:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Footer editing is available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        settings = get_footer_settings(source_payload)
+        return {"job_id": source_job.id, **settings}
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/edit-text", response_model=JobResponse)
+def edit_paragraph_text(
+    job_id: str,
+    request: TextEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Text editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "text_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = replace_paragraph_text(
+            source_payload, request.paragraph_index, request.text
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["text_edit"] = {
+            "paragraph_index": request.paragraph_index,
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Text editing failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/edit-footer", response_model=JobResponse)
+def edit_document_footer(
+    job_id: str,
+    request: FooterEditRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Footer editing is available for DOCX files only.")
+
+    edit_job = _new_job(db, "footer_edit", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed_parts = edit_footer(
+            source_payload,
+            course_text=request.course_text,
+            copyright_text=request.copyright_text,
+            page_label=request.page_label,
+            page_offset=request.page_offset,
+            course_offset=request.course_offset,
+            copyright_offset=request.copyright_offset,
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["footer_edit"] = {
+            "footer_parts_changed": changed_parts,
+            "source_job_id": source_job.id,
+            "page_offset": request.page_offset,
+            "course_offset": request.course_offset,
+            "copyright_offset": request.copyright_offset,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Footer editing failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/update-toc", response_model=JobResponse)
+def update_document_toc(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="TOC updates are available for DOCX files only.")
+
+    edit_job = _new_job(db, "toc_update", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, entries = regenerate_toc(source_payload)
+
+        field_refresh = {
+            "exact_layout_refresh": False,
+            "indexes_updated": 0,
+            "fields_refreshed": False,
+        }
+        field_refresh_warning = None
+        try:
+            edited_payload, field_refresh = update_docx_fields(edited_payload)
+        except LibreOfficeFieldError as exc:
+            # The cached TOC has already been rebuilt above. Keep that valid
+            # document as a fallback and report that exact layout/page-number
+            # recalculation was unavailable on this server.
+            field_refresh_warning = str(exc)
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["toc_update"] = {
+            "entries": entries,
+            "source_job_id": source_job.id,
+            **field_refresh,
+        }
+        if field_refresh_warning:
+            details["toc_update"]["warning"] = field_refresh_warning
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Table of Contents update failed.") from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/convert-to-pdf", response_model=JobResponse)
+def convert_formatted_job_to_pdf(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="PDF conversion is available for formatted DOCX files only.")
+
+    conversion_job = _new_job(db, "formatted_word_to_pdf", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        output_filename, pdf_payload, content_type, details = convert_word_files(
+            [(source_job.output_filename, source_payload)]
+        )
+        details["build"] = BUILD_VERSION
+        details["source_format_job_id"] = source_job.id
+
+        output_key = f"jobs/{conversion_job.id}/{output_filename}"
+        storage.put_bytes(output_key, pdf_payload, content_type)
+        conversion_job = _complete_job(
+            db,
+            conversion_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(conversion_job)
+    except StorageError as exc:
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except WordToPdfError as exc:
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Formatted document PDF conversion failed for job %s", conversion_job.id)
+        _fail_job(db, conversion_job, exc)
+        raise HTTPException(status_code=500, detail="Formatted document PDF conversion failed. Check backend logs for details.") from exc
+
+
+@app.post(f"{API_PREFIX}/pdf/page-count")
+async def pdf_page_count(file: Annotated[UploadFile, File(...)]) -> dict:
+    try:
+        payload = await file.read()
+        return {"pages": get_pdf_page_count(payload)}
+    except PdfEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/pdf/remove-pages", response_model=JobResponse)
+async def pdf_remove_pages(
+    file: Annotated[UploadFile, File(...)],
+    pages: Annotated[str, Form(...)],
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(file.filename or "").suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Upload a PDF file.")
+    job = _new_job(db, "pdf_remove_pages", file.filename)
+    try:
+        selected = [int(part.strip()) for part in pages.split(",") if part.strip()]
+        payload = await file.read()
+        updated = remove_pdf_pages(payload, selected)
+        stem = _safe_stem(file.filename, "pdf")
+        output_filename = f"{stem}_pages_removed.pdf"
+        output_key = f"jobs/{job.id}/{output_filename}"
+        storage.put_bytes(output_key, updated, "application/pdf")
+        details = {
+            "removed_pages": sorted(set(selected)),
+            "original_pages": get_pdf_page_count(payload),
+            "remaining_pages": get_pdf_page_count(updated),
+        }
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (ValueError, PdfEditingError) as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("PDF page removal failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="PDF page removal failed. Check backend logs for details.") from exc
+
+
+@app.post(f"{API_PREFIX}/pdf/replace-cover", response_model=JobResponse)
+async def pdf_replace_cover(
+    file: Annotated[UploadFile, File(...)],
+    cover: Annotated[UploadFile, File(...)],
+    awarding_body: Annotated[str, Form()],
+    course_name: Annotated[str, Form()],
+    unit_name: Annotated[str, Form()],
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(file.filename or "").suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Upload a PDF file.")
+
+    cover_suffix = Path(cover.filename or "").suffix.lower()
+    if cover_suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(
+            status_code=400,
+            detail="The replacement cover must be a PDF, JPG, PNG, or WebP file.",
+        )
+
+    job = _new_job(db, "pdf_replace_cover", file.filename)
+
+    try:
+        payload = await file.read()
+        cover_payload = await cover.read()
+        updated, details = replace_pdf_cover_with_three_lines(
+            payload,
+            cover_payload,
+            cover.filename,
+            awarding_body,
+            course_name,
+            unit_name,
+        )
+        details["build"] = BUILD_VERSION
+
+        stem = _safe_stem(file.filename, "pdf")
+        output_filename = f"{stem}_cover_updated.pdf"
+        output_key = f"jobs/{job.id}/{output_filename}"
+        storage.put_bytes(output_key, updated, "application/pdf")
+
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PdfEditingError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("PDF cover replacement failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="PDF cover replacement failed. Check backend logs for details.") from exc
+
+
+@app.post(f"{API_PREFIX}/pdf/replace-cover-text", response_model=JobResponse)
+async def pdf_replace_cover_text(
+    file: Annotated[UploadFile, File(...)],
+    replacements: Annotated[str, Form()] = "[]",
+    cover: Annotated[UploadFile | None, File()] = None,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    if Path(file.filename or "").suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Upload a PDF file.")
+
+    if cover is not None:
+        cover_suffix = Path(cover.filename or "").suffix.lower()
+        if cover_suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+            raise HTTPException(
+                status_code=400,
+                detail="The replacement cover must be a PDF, JPG, PNG, or WebP file.",
+            )
+
+    job = _new_job(db, "pdf_replace_cover_text", file.filename)
+
+    try:
+        try:
+            raw_replacements = json.loads(replacements or "[]")
+        except json.JSONDecodeError as exc:
+            raise PdfEditingError("Text replacements must be valid JSON.") from exc
+
+        if not isinstance(raw_replacements, list):
+            raise PdfEditingError("Text replacements must be a list.")
+
+        parsed_replacements: list[tuple[str, str]] = []
+        for item in raw_replacements:
+            if not isinstance(item, dict):
+                raise PdfEditingError("Each text replacement must contain find and replace values.")
+            find_text = str(item.get("find", "") or "")
+            replace_text = str(item.get("replace", "") or "")
+            if find_text.strip():
+                parsed_replacements.append((find_text, replace_text))
+
+        payload = await file.read()
+        cover_payload = await cover.read() if cover is not None else None
+
+        updated, details = replace_pdf_cover_and_text(
+            payload,
+            cover_bytes=cover_payload,
+            cover_filename=cover.filename if cover is not None else None,
+            replacements=parsed_replacements,
+        )
+        details["build"] = BUILD_VERSION
+
+        stem = _safe_stem(file.filename, "pdf")
+        output_filename = f"{stem}_cover_text_updated.pdf"
+        output_key = f"jobs/{job.id}/{output_filename}"
+        storage.put_bytes(output_key, updated, "application/pdf")
+
+        job = _complete_job(
+            db,
+            job,
+            output_filename=output_filename,
+            output_key=output_key,
+            details=details,
+        )
+        return _job_response(job)
+    except StorageError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PdfEditingError as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("PDF cover/text replacement failed for job %s", job.id)
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=500, detail="PDF cover/text replacement failed. Check backend logs for details.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/history")
+def job_history(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """Walk the job chain backwards from job_id and return a history list.
+
+    Each entry contains the job id, type, a human-readable label, the
+    completed_at timestamp, and the download URL so the frontend can let the
+    user revert to any earlier state in one click.
+    """
+    _LABELS: dict[str, str] = {
+        "format":               "Initial format",
+        "format_batch":         "Batch format",
+        "simple_edit":          "Formatting edit",
+        "text_edit":            "Text edit",
+        "footer_edit":          "Footer edit",
+        "toc_update":           "TOC update",
+        "clean_spacing":        "Spacing clean",
+        "formatted_word_to_pdf": "PDF conversion",
+        "references_bullets":   "References → Bullets",
+    }
+
+    history: list[dict] = []
+    current_id: str | None = job_id
+    seen: set[str] = set()
+
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        job = db.get(Job, current_id)
+        if not job or job.status != "completed":
+            break
+
+        try:
+            details = json.loads(job.meta_json) if job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+
+        # Derive a richer label for simple_edit by including the action name.
+        label = _LABELS.get(job.job_type, job.job_type)
+        if job.job_type == "simple_edit":
+            action = details.get("simple_edit", {}).get("action", "")
+            action_labels: dict[str, str] = {
+                "heading1":              "→ Heading 1",
+                "bullets":               "→ Bullets",
+                "numbering":             "→ Numbering",
+                "references_bullets":    "→ Reference Bullets",
+                "normal":                "→ Normal text",
+                "page_break_before":     "→ New page",
+                "remove_page_break_before": "→ Normal flow",
+                "keep_together":         "→ Keep together",
+                "allow_split":           "→ Allow split",
+                "blank_line_before":     "+ Blank line above",
+                "blank_line_after":      "+ Blank line below",
+            }
+            if action in action_labels:
+                label = f"Edit {action_labels[action]}"
+
+        history.append({
+            "job_id":     job.id,
+            "job_type":   job.job_type,
+            "label":      label,
+            "filename":   job.output_filename,
+            "download_url": f"{API_PREFIX}/jobs/{job.id}/download" if job.output_key else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "is_current": job.id == job_id,
+        })
+
+        # Walk to the source job that produced this one.
+        source_id: str | None = None
+        for key in ("simple_edit", "text_edit", "footer_edit", "toc_update", "clean_spacing"):
+            source_id = details.get(key, {}).get("source_job_id")
+            if source_id:
+                break
+        if not source_id:
+            source_id = details.get("source_format_job_id")
+        current_id = source_id
+
+    return {"job_id": job_id, "history": history}
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/spacing-issues")
+def spacing_issues(job_id: str, db: Session = Depends(get_db)) -> dict:
+    """Return a list of detected page-spacing issues for a formatted DOCX job."""
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Spacing checks are available for DOCX files only.")
+
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        issues = check_page_spacing(source_payload)
+        return {"job_id": source_job.id, "issues": issues, "total": len(issues)}
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except SimpleEditingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/jobs/{{job_id}}/clean-spacing", response_model=JobResponse)
+def clean_document_spacing(
+    job_id: str,
+    request: CleanSpacingRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    """Apply automatic spacing fixes to a formatted DOCX job."""
+    source_job = db.get(Job, job_id)
+    if not source_job or not source_job.output_key or not source_job.output_filename:
+        raise HTTPException(status_code=404, detail="Formatted document not found.")
+    if Path(source_job.output_filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="Spacing clean is available for DOCX files only.")
+
+    edit_job = _new_job(db, "clean_spacing", source_job.output_filename)
+    try:
+        source_payload = storage.get_bytes(source_job.output_key)
+        edited_payload, changed = clean_page_spacing(
+            source_payload,
+            remove_extra_blanks=request.remove_extra_blanks,
+            remove_multi_breaks=request.remove_multi_breaks,
+            fix_orphan_headings=request.fix_orphan_headings,
+        )
+
+        source_stem = _safe_stem(source_job.output_filename)
+        while source_stem.endswith("_edited"):
+            source_stem = source_stem[:-7]
+        output_filename = f"{source_stem}_edited.docx"
+        output_key = f"jobs/{edit_job.id}/{output_filename}"
+        storage.put_bytes(
+            output_key,
+            edited_payload,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        try:
+            details = json.loads(source_job.meta_json) if source_job.meta_json else {}
+        except json.JSONDecodeError:
+            details = {}
+        details["build"] = BUILD_VERSION
+        details["clean_spacing"] = {
+            "paragraphs_changed": changed,
+            "source_job_id": source_job.id,
+            "remove_extra_blanks": request.remove_extra_blanks,
+            "remove_multi_breaks": request.remove_multi_breaks,
+            "fix_orphan_headings": request.fix_orphan_headings,
+        }
+
+        edit_job = _complete_job(
+            db,
+            edit_job,
+            output_filename=output_filename,
+            output_key=output_key,
+            report_key=source_job.report_key,
+            details=details,
+        )
+        return _job_response(edit_job)
+    except StorageError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SimpleEditingError as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, edit_job, exc)
+        raise HTTPException(status_code=500, detail="Spacing clean failed.") from exc
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobResponse)
+def get_job(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return _job_response(job)
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/download")
+def download_job(job_id: str, db: Session = Depends(get_db)) -> Response:
+    job = db.get(Job, job_id)
+    if not job or not job.output_key or not job.output_filename:
+        raise HTTPException(status_code=404, detail="Output file not found.")
+    try:
+        payload = storage.get_bytes(job.output_key)
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    content_type = mimetypes.guess_type(job.output_filename)[0] or "application/octet-stream"
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{job.output_filename}"'},
+    )
+
+
+@app.get(f"{API_PREFIX}/jobs/{{job_id}}/report")
+def download_report(job_id: str, db: Session = Depends(get_db)) -> Response:
+    job = db.get(Job, job_id)
+    if not job or not job.report_key:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    try:
+        payload = storage.get_bytes(job.report_key)
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    return Response(
+        content=payload,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="validation_report.txt"'},
+    )
