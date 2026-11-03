@@ -53,7 +53,7 @@ from .services.course_image_review import make_image_preview, finish_image_previ
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v26-free-first-image-repair"
+BUILD_VERSION = "2026.11.03-v28-course-heading-context-relevance"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")

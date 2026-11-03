@@ -18,7 +18,9 @@ from .storage import StorageError, StorageNotFoundError, storage
 
 MAX_DOWNLOAD_BYTES = 22 * 1024 * 1024
 ALLOWED_PIXABAY_HOSTS = {"cdn.pixabay.com", "pixabay.com"}
-ALLOWED_OPENVERSE_HOSTS = {"upload.wikimedia.org"}
+# StockSnap images are also surfaced by Openverse as CC0; the image bytes
+# must be hosted on the exact approved publisher CDN, not arbitrary URLs.
+ALLOWED_OPENVERSE_HOSTS = {"upload.wikimedia.org", "cdn.stocksnap.io"}
 
 
 def _allowed_https(url: str, hosts: set[str]) -> bool:
@@ -51,19 +53,91 @@ def _download(client: httpx.Client, url: str, hosts: set[str]) -> bytes:
     return b"".join(chunks)
 
 
+# Translate synonyms into *observable* photo concepts. An academic heading
+# such as "Collaborating" does not have to appear verbatim in Pixabay tags for
+# a tagged "team meeting" photograph to be a valid candidate.
+_CONCEPT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^(?:collab|team|colleag|cowork|group|cooperat)", "team"),
+    (r"^(?:manag|leader|lead|supervis|direct|boss)", "manager"),
+    (r"^(?:meet|discuss|negotiat|convers|communicat|dialog|consult|talk|mediate)", "meeting"),
+    (r"^(?:office|workplace|workstation)", "office"),
+    (r"^(?:business|corporat|company|enterprise)", "business"),
+    (r"^(?:photograph|photo|picture|image|stock)", "_stop"),
+    (r"^(?:person|people|human|adult|woman|women|man|men)", "_stop"),
+    (r"^(?:employ|staff|worker|professional)", "staff"),
+    (r"^(?:secure|confiden|privacy|private|protect|security)", "security"),
+    (r"^(?:document|record|paperwork|file|filing|folder)", "records"),
+    (r"^(?:child|kid|pupil|youngster)", "child"),
+    (r"^(?:caregiv|carer|nurs|healthcar)", "healthcare"),
+    (r"^(?:stud|learn|educat|teach|classroom|school)", "education"),
+    (r"^(?:hospital|clinic|medical)", "clinical"),
+    (r"^(?:advic|support|assist|help)", "support"),
+    (r"^(?:safeguard|welfare|protect)", "safeguarding"),
+    (r"^(?:recruit|interview|hir)", "recruitment"),
+    (r"^(?:calculat|account|bookkeep|payroll|wage|salary)", "payroll"),
+    (r"^(?:inspect|audit|review|check|monitor)", "review"),
+    (r"^(?:resolve|resolut|solv)", "solve"),
+    (r"^(?:planning|plan|schedul|strateg)", "planning"),
+    (r"^(?:rubbish|recycl|dispos|waste)", "waste"),
+    (r"^(?:computer|laptop|desktop|technology|digital)", "computer"),
+)
+_GENERIC_CONCEPTS = {"business", "office", "team", "meeting", "staff", "computer"}
+_IGNORE_WORDS = {"the", "and", "a", "an", "with", "for", "from", "into", "this", "that",
+                 "there", "where", "why", "how", "when", "without", "use", "using",
+                 "professional", "appropriate", "relevant", "natural", "realistic", "view",
+                 "background", "beautiful", "training", "course", "work", "stock"}
+
+
 def _words(value: str) -> set[str]:
-    common = {"the", "and", "photo", "image", "stock", "people", "workplace", "professional", "with", "for", "from", "training", "course"}
-    return {w for w in re.findall(r"[a-z]{3,}", value.lower()) if w not in common}
+    concepts: set[str] = set()
+    for word in re.findall(r"[a-z]{3,}", value.lower()):
+        if word in _IGNORE_WORDS:
+            continue
+        concept = word.rstrip("s") if len(word) > 5 and not word.endswith("ss") else word
+        for pattern, group in _CONCEPT_PATTERNS:
+            if re.match(pattern, word):
+                concept = group
+                break
+        if concept != "_stop":
+            concepts.add(concept)
+    return concepts
 
 
 def _rank(query: str, subject: str, description: str) -> int:
+    """Score stock tags using photographic concepts, not literal academic terms.
+
+    A provider photo is never *verified* by text tags; the user must still view
+    it. Reject weak/generic one-token overlaps, but let specific terms such as
+    'records' qualify and avoid the v27 requirement to repeat heading words.
+    """
     words = _words(description)
     query_words = _words(query)
-    subject_words = _words(subject)
-    overlap = len(words & query_words)
-    if overlap == 0 or (subject_words and not (subject_words & words)):
+    if not words or not query_words:
         return 0
-    return 2 * overlap + len(words & subject_words)
+    shared = words & query_words
+    if not shared:
+        return 0
+    # A solitary generic label ("office") doesn't establish course relevance.
+    if len(shared) == 1 and len(query_words) >= 2 and not (shared - _GENERIC_CONCEPTS):
+        return 0
+    heading_bonus = len(words & _words(subject))
+    return 4 * len(shared) + min(2, heading_bonus)
+
+
+def _query_fallback(query: str) -> str:
+    """One wider tag-friendly query if the precise search has no suitable hit."""
+    words = query.lower().split()
+    translations = {
+        "thoughtful": "", "leading": "", "solving": "", "colleagues": "team",
+        "collaborating": "team", "collaboration": "team", "negotiation": "meeting",
+        "negotiating": "meeting", "conversation": "meeting", "discussion": "meeting",
+        "professional": "", "appropriate": "", "relevant": "",
+        "safeguarding": "care", "practitioner": "worker",
+        "evaluating": "reviewing", "reviewing": "review",
+    }
+    expanded = [translations.get(word, word) for word in words]
+    selected = list(dict.fromkeys(w for w in expanded if w))
+    return " ".join(selected[:4])
 
 
 def _pixabay_search(client: httpx.Client, api_key: str, query: str, portrait: bool) -> list[dict]:
@@ -97,25 +171,30 @@ def _pixabay_search(client: httpx.Client, api_key: str, query: str, portrait: bo
 def find_pixabay(key: str, query: str, subject: str, used: set[str], *, portrait: bool, normalise) -> tuple[bytes, str, str, str, str] | None:
     if not key:
         return None
+    # One primary query + at most one broader query. This avoids repeatedly
+    # downloading unrelated results or exhausting a free account's rate limit.
+    wider = _query_fallback(query)
+    queries = [query] + ([wider] if wider and wider.casefold() != query.casefold() else [])
     with httpx.Client(timeout=22, follow_redirects=False) as client:
-        hits = _pixabay_search(client, key, query, portrait)
-        ranked = sorted(
-            ((score, hit) for hit in hits if isinstance(hit, dict)
-             and (score := _rank(query, subject, str(hit.get("tags", "")))) > 0),
-            key=lambda it: it[0], reverse=True,
-        )
-        for _, hit in ranked[:5]:
-            identifier = f"pixabay:{hit.get('id', '')}"
-            if not hit.get("id") or identifier in used:
-                continue
-            url = str(hit.get("largeImageURL") or hit.get("webformatURL") or "")
-            if not _allowed_https(url, ALLOWED_PIXABAY_HOSTS):
-                continue
-            try:
-                payload = normalise(_download(client, url, ALLOWED_PIXABAY_HOSTS))
-                return payload, str(hit.get("pageURL", "")), identifier, "Pixabay Content License", str(hit.get("user", ""))[:100]
-            except (ValueError, httpx.HTTPError, OSError):
-                continue
+        for search in queries[:2]:
+            hits = _pixabay_search(client, key, search, portrait)
+            ranked = sorted(
+                ((score, order, hit) for order, hit in enumerate(hits) if isinstance(hit, dict)
+                 and (score := _rank(query, subject, str(hit.get("tags", "")))) > 0),
+                key=lambda it: (-it[0], it[1]),
+            )
+            for _, _, hit in ranked[:5]:
+                identifier = f"pixabay:{hit.get('id', '')}"
+                if not hit.get("id") or identifier in used:
+                    continue
+                url = str(hit.get("largeImageURL") or hit.get("webformatURL") or "")
+                if not _allowed_https(url, ALLOWED_PIXABAY_HOSTS):
+                    continue
+                try:
+                    payload = normalise(_download(client, url, ALLOWED_PIXABAY_HOSTS))
+                    return payload, str(hit.get("pageURL", "")), identifier, "Pixabay Content License", str(hit.get("user", ""))[:100]
+                except (ValueError, httpx.HTTPError, OSError):
+                    continue
     return None
 
 

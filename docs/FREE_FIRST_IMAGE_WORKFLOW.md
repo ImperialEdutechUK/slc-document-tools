@@ -1,4 +1,4 @@
-# Find & Add Images — v26 cost-safe, review-before-insert workflow
+# Find & Add Images — v27 contextual search, diagnostic review workflow
 
 This workflow is separate from Document Formatter's URL/hyperlink image insertion. It leaves existing Word text, headings, paragraph styles and tables in place, inserting only the selected photographs below eligible headings.
 
@@ -11,7 +11,9 @@ This workflow is separate from Document Formatter's URL/hyperlink image insertio
 - **Reuse saved image library:** ON. Free photographs are cached by heading/search **after they are selected and inserted**, not merely previewed, in S3-compatible storage or temporarily in `STORAGE_DIR`.
 - **Big ZIP fairness and timeouts:** Preview positions are spread across chapters before the maximum is applied. By default at most 16 photos, 32 stock-search attempts and approximately 75 seconds of stock lookups are allocated per review. Increase `COURSE_IMAGE_MAX_PREVIEW_IMAGES`, `COURSE_IMAGE_MAX_STOCK_LOOKUPS` or `COURSE_IMAGE_MAX_SEARCH_SECONDS` in Railway for bigger batches if acceptable; reports name any skipped headings.
 - **Preview images first:** ON. Untick unsuitable images or change search words with **Find free alternative** (never uses Freepik; at most 8 successful swaps per review).
-- **OpenRouter text improvement:** OFF by default, because it is optional and may have a separate text API cost.
+- **OpenRouter text improvement:** OFF by default, because it is optional and may have a separate text API cost. It now supports conceptually appropriate photo synonyms without requiring exact academic heading words.
+- **Contextual photo searches:** professional conflict headings are converted to photographable scenes. Pexels results with no detailed caption are allowed into the preview (not automatically approved). Openverse can retrieve CC0/PDM StockSnap CDN photographs as well as Wikimedia hosts.
+- **Zero-result help:** the results screen shows which providers are configured, how many requests were made to each, and heading-specific Pexels and StockSnap search links. Without a Pexels/Pixabay key, Openverse is usable but may have insufficient photographs for a particular academic heading.
 
 ## User workflow
 
@@ -39,7 +41,7 @@ COURSE_IMAGE_MAX_SEARCH_SECONDS=75
 # S3_SECRET_ACCESS_KEY and S3_REGION for persistent reuse.
 ```
 
-For Vercel, set `NEXT_PUBLIC_API_URL` to the public Railway backend URL (without a trailing slash). In Railway, add the Vercel origin to `ALLOWED_ORIGINS`. Redeploy both services. `GET /health` should show `2026.11.03-v26-free-first-image-repair`.
+For Vercel, set `NEXT_PUBLIC_API_URL` to the public Railway backend URL (without a trailing slash). In Railway, add the Vercel origin to `ALLOWED_ORIGINS`. Redeploy both services. `GET /health` should show `2026.11.03-v27-contextual-search-diagnostics`.
 
 The Pexels API is free subject to its published rate limits and attribution/link guidance. Pixabay search responses are cached for 24 hours. Openverse matches are restricted to CC0/PDM metadata and actual photos hosted on approved Wikimedia CDN hosts. Check the source licence and context before publishing. Freepik catalogue/download calls may still count against the account; the app cannot measure actual charged credits. A Freepik "freemium" label is not a guarantee of unrestricted rights.
 

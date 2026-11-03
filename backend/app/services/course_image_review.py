@@ -19,7 +19,7 @@ from docx import Document
 
 from .course_images import (
     CourseImagesError, CourseImagesResult, ImagePlan, Picture, Provider,
-    _insert_images, _plans, _read_chapters, _safe_name,
+    _insert_images, _plans, _read_chapters, _safe_name, _chapter_overview,
 )
 from .course_image_library import ImageLibrary, SavedImage
 
@@ -65,15 +65,18 @@ def make_image_preview(
     lookup_limit_hit = False
     time_limit_hit = False
     chapter_plans: list[list[tuple[int, str, ImagePlan]]] = []
+    chapter_overviews: list[str] = []
     out = BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
         for chapter_index, chapter in enumerate(chapters):
             names.append(chapter.filename)
             package.writestr(f"documents/{chapter_index}.docx", chapter.payload)
             chapter_plans.append([])
+            chapter_overviews.append("")
             try:
                 doc = Document(BytesIO(chapter.payload))
                 plans, eligible = _plans(doc, f"{course_name} {chapter.title}")
+                chapter_overviews[chapter_index] = _chapter_overview(doc)
                 eligible_total += eligible
             except Exception as exc:
                 warnings.append(f"{chapter.filename}: cannot plan images ({type(exc).__name__}).")
@@ -96,7 +99,8 @@ def make_image_preview(
                 limited = [plan for chapter_index, _, plan in pending[:MAX_STOCK_LOOKUPS]
                            if chapter_index == index]
                 if limited:
-                    provider.refine_plans(course_name, chapter.title, limited)
+                    provider.refine_plans(course_name or chapter.title, chapter.title, limited,
+                                          chapter_overview=chapter_overviews[index])
 
         started = time.monotonic()
         for chapter_index, chapter_filename, plan in pending:
@@ -123,6 +127,7 @@ def make_image_preview(
             details = {
                 "id": idx, "chapter_index": chapter_index, "chapter": chapter_filename,
                 "heading": plan.heading, "search": plan.search,
+                "intended_scene": plan.description,
                 "original_search": plan.search,
                 "plan": asdict(plan),
                 "source": photo.source, "source_url": photo.source_url,
@@ -137,6 +142,15 @@ def make_image_preview(
             warnings.append(f"Stock-search limit reached ({MAX_STOCK_LOOKUPS} headings per job). Remaining headings were skipped to protect provider quotas.")
         if time_limit_hit:
             warnings.append(f"Search-time limit reached ({MAX_SEARCH_SECONDS} seconds per job). Remaining headings were skipped to prevent a stalled upload.")
+        if images_acquired == 0:
+            if not provider.pexels_key:
+                warnings.append("Pexels API is not configured. Add a free PEXELS_API_KEY in Railway for realistic stock photography.")
+            if not provider.pixabay_key:
+                warnings.append("Pixabay API is not configured. Add PIXABAY_API_KEY for an additional free source.")
+            if provider.openverse_enabled and not provider.pexels_key and not provider.pixabay_key:
+                warnings.append("Only public-domain Openverse is configured; its limited photo catalogue may not cover abstract workplace topics.")
+            if not provider.pexels_key and not provider.pixabay_key and not provider.openverse_enabled:
+                warnings.append("No free photo API is enabled for this job. Freepik stock may have reached its paid request budget.")
         report = {
             "original_filename": filename, "course_name": course_name,
             "chapters": names, "previews": previews,
@@ -150,6 +164,17 @@ def make_image_preview(
             "eligible_headings": eligible_total,
             "planned_image_positions": len(pending),
             "stock_lookups_attempted": lookups_attempted,
+            "matching_policy": "Course title + chapter context + individual heading; stock tags are suggestions, not visual verification.",
+            "provider_attempts": provider.provider_attempts,
+            "provider_successes": provider.provider_successes,
+            "missing_images": [
+                {"chapter": filename_, "heading": planned.heading, "search": planned.search,
+                 "intended_scene": planned.description,
+                 "pexels_url": planned.pexels_link, "stocksnap_url": planned.stocksnap_link,
+                 "pixabay_url": planned.pixabay_link}
+                for _, filename_, planned in pending[:lookups_attempted][:60]
+                if not any(x["chapter"] == filename_ and x["heading"] == planned.heading for x in previews)
+            ],
             "warnings": list(dict.fromkeys(warnings + provider.warnings)),
             "providers_configured": {
                 "pexels": bool(provider.pexels_key), "pixabay": bool(provider.pixabay_key),

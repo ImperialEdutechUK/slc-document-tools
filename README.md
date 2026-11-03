@@ -1,4 +1,12 @@
-> **Current release v26:** See [`RELEASE_V26.md`](RELEASE_V26.md) for the repaired **Find & Add Images** tab, strict Freepik cost controls, free-image replacements and deployment instructions. The separate v25 any-name linked-image formatting fixes remain included; see [`RELEASE_V25.md`](RELEASE_V25.md).
+## Latest fix — Find & Add Images v28 (matching course + headings)
+
+**Current release: v28.** A successful Pixabay API key alone cannot ensure relevant pictures. v28 examines the course title, local paragraphs and chapter context, translates headings into realistic stock-photo scenes, matches Pixabay tags by photographic meaning instead of exact academic words, and adds a broader-query fallback. **Nothing is preselected** in the image preview: approve only suitable photos. No Freepik image credits are used unless explicitly enabled. See [RELEASE_V28.md](RELEASE_V28.md) for the fix, Railway settings, deployment and testing.
+
+## Earlier fix — Find & Add Images v27
+
+For contextual search, Pexels captionless results, keyless Openverse/StockSnap public-domain sources, and zero-results diagnostics, see [RELEASE_V27.md](RELEASE_V27.md). Railway `/health` build: `2026.11.03-v27-contextual-search-diagnostics`. For consistent automatic stock-photo results, configure the free `PEXELS_API_KEY`; otherwise use Openverse or manual search links. Freepik remains opt-in, with `COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=0` to prohibit paid fallback completely.
+
+> **Earlier release v26:** See [`RELEASE_V26.md`](RELEASE_V26.md) for the repaired **Find & Add Images** tab, strict Freepik cost controls, free-image replacements and deployment instructions. The separate v25 any-name linked-image formatting fixes remain included; see [`RELEASE_V25.md`](RELEASE_V25.md).
 
 ## Automatic linked images regardless of hyperlink display text
 
@@ -43,13 +51,13 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - DOCX or ZIP input from the same formatter screen.
 - Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
-### Find & Add Images — v26 credit-safe workflow
+### Find & Add Images — v28 context-aware, credit-safe workflow
 
 **Defaults:** `image_source=mixed`, `reuse_existing=true`, `preview_images=true`, `allow_freepik=false`, `use_openrouter=false`. Mixed mode works with only free sources and the stored image library until you explicitly enable Freepik stock; paid **AI image generation is disabled** throughout this workflow.
 
 1. Upload a single DOCX or a ZIP of chapter DOCX files.
 2. Click **Find images and preview**. The backend checks its saved image library and then tries **Pexels → Pixabay → Openverse** (CC0/public-domain Wikimedia-hosted photos). Without the separate opt-in, **zero Freepik calls** are made. If explicitly enabled, Freepik stock is limited to **one search attempt and one successful download** by default, even when the attempt fails.
-3. See image thumbnails, chapter/heading placement, origin, licence and photographer. Uncheck unwanted pictures, or use **Find free alternative** to retry one photograph with better search words (free providers only, up to eight successful replacements per review). The app searches chapter plans in a balanced order, so large ZIPs do not use their entire preview allowance on the first chapter.
+3. See image thumbnails, intended photographic scene, exact chapter/heading placement, origin, licence and photographer. Every photo starts **unchecked**: actively approve only genuinely relevant pictures, or use **Find free alternative** to retry one photograph with better search words (free providers only, up to eight successful replacements per review). The app searches chapter plans in a balanced order, so large ZIPs do not use their entire preview allowance on the first chapter.
 4. Click **Insert selected images and download**. This step uses already acquired bytes, so it makes **no further stock-provider calls**. The DOCX retains all original paragraph text, styles and headings; adding pictures may change page flow. Existing illustrations and Summary/References/Contents headings are skipped.
 5. A single DOCX returns a single DOCX. A ZIP returns a ZIP containing edited chapter DOCX files.
 

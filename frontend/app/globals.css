@@ -1993,3 +1993,7 @@ a {
 .image-replace-controls { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .image-replace-controls input { width: 100%; min-width: 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-3); color: var(--text); }
 .image-replace-controls .button { align-self: flex-start; }
+
+/* v28: show the intended educational scene beside each actual stock photo. */
+.image-scene-hint { display: block; margin: 0.4rem 0; line-height: 1.48; font-size: .85rem; color: var(--muted, #9cb0bd); }
+.image-scene-hint strong { color: inherit; }

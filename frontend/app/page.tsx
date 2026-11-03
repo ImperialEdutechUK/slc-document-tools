@@ -1918,6 +1918,7 @@ type CourseImageCandidate = {
   chapter: string;
   heading: string;
   search: string;
+  intended_scene?: string;
   source: string;
   source_url?: string;
   licence?: string;
@@ -1949,7 +1950,7 @@ function CourseImagesPanel() {
     { value: "free", label: "Free sources only", info: "Never request Freepik photos or credits" },
     { value: "pexels", label: "Pexels only", info: "Free Pexels stock photographs" },
     { value: "pixabay", label: "Pixabay only", info: "Free Pixabay stock photographs" },
-    { value: "openverse", label: "Openverse only", info: "CC0 and public-domain Wikimedia-hosted photographs" },
+    { value: "openverse", label: "Openverse only", info: "CC0 and public-domain photos from Wikimedia and StockSnap" },
     { value: "freepik", label: "Freepik stock only", info: "Freepik API stock downloads may incur charges" },
   ] as const;
 
@@ -1988,7 +1989,8 @@ function CourseImagesPanel() {
           method: "POST", body: form,
         });
         const items: CourseImageCandidate[] = result.details?.previews || [];
-        setSelectedImages(items.map((entry) => entry.id));
+        // No automatic approval: course relevance must be confirmed visually.
+        setSelectedImages([]);
         setReplacementQueries({});
         setReviewJob(result);
       } else {
@@ -2056,7 +2058,7 @@ function CourseImagesPanel() {
         <div>
           <span className="eyebrow">SLC Course Image Workflow</span>
           <h2>Find &amp; Add Images</h2>
-          <p>Find relevant photographs at the lowest available cost, review them, and keep your original Word text and headings unchanged.</p>
+          <p>Find authentic photographs using the course title, the individual heading and the chapter's teaching context. Approve each match before inserting; existing Word content stays unchanged.</p>
         </div>
         <div className="hero-badge">IMG</div>
       </section>
@@ -2072,9 +2074,10 @@ function CourseImagesPanel() {
             help={file?.name || "Choose a .docx file or a .zip containing Word chapters"}
           />
           <label className="input-label">
-            Course / Module Title
-            <input value={courseName} placeholder="Optional – otherwise use file names"
+            Course / Module Title (strongly recommended for accurate matches)
+            <input value={courseName} placeholder="Enter the exact course title, e.g. HR and Payroll Management for the UK"
               onChange={(event) => { setCourseName(event.target.value); resetResults(); }} />
+            <small>Enter the real course name: it sets the subject and professional setting for every image. If left blank, the app uses chapter filenames and Word content.</small>
           </label>
           {mode === "guides" && (
             <FileField label="Existing cover image (optional)" accept=".png,.jpg,.jpeg,.webp"
@@ -2085,7 +2088,7 @@ function CourseImagesPanel() {
         <section className="card">
           <div className="section-heading">
             <span>02</span><div><h3>Image source and savings</h3>
-            <p>Use free photos first. Paid stock is off unless you explicitly enable it; AI generation is disabled.</p></div>
+            <p>Search visual situations rather than abstract heading keywords. Use free photos first; AI image generation is disabled.</p></div>
           </div>
           <label className="toggle-row">
             <input type="radio" name="image-mode" value="insert" checked={mode === "insert"}
@@ -2138,7 +2141,7 @@ function CourseImagesPanel() {
             <input type="checkbox" checked={useOpenrouter}
               onChange={(event) => { setUseOpenrouter(event.target.checked); resetResults(); }} />
             <span><strong>Improve search queries with OpenRouter (optional)</strong>
-              <small>May incur text API costs. No AI image generation.</small></span>
+              <small>Optional ChatGPT-style reading of course, chapter, heading and supporting text to improve search phrases. Requires OPENROUTER_API_KEY; may incur low text API charges. Does not generate photographs.</small></span>
           </label>
           {imageSource === "mixed" && (
             <p className="image-cost-notice">
@@ -2159,7 +2162,7 @@ function CourseImagesPanel() {
         <section className="card image-review-section">
           <div className="section-heading">
             <span>03</span><div><h3>Review your suggested images</h3>
-              <p>Uncheck any image you do not want. Images are already downloaded, so confirming does not make another provider request.</p></div>
+              <p>Only tick photographs that genuinely illustrate the heading and the course. No images are pre-approved. Images already downloaded will not consume more requests when you confirm.</p></div>
           </div>
           <div className="image-summary-grid">
             <div><strong>{candidates.length}</strong><span>Photos found</span></div>
@@ -2170,6 +2173,12 @@ function CourseImagesPanel() {
             <div><strong>{reviewJob.details?.stock_lookups_attempted ?? 0}</strong><span>Stock-photo searches</span></div>
             <div><strong>0</strong><span>AI image generations</span></div>
           </div>
+          {reviewJob.details?.providers_configured && (
+            <p className="image-cost-notice">
+              Free photo APIs available on Railway: {reviewJob.details.providers_configured.pexels ? "Pexels ✓" : "Pexels not configured"} · {reviewJob.details.providers_configured.pixabay ? "Pixabay ✓" : "Pixabay not configured"} · {reviewJob.details.providers_configured.openverse ? "Openverse ✓" : "Openverse disabled"}.
+              {reviewJob.details?.provider_attempts && <> Search attempts: {Object.entries(reviewJob.details.provider_attempts).map(([name, count]) => `${name}: ${count}`).join(" · ")}.</>}
+            </p>
+          )}
           {candidates.length > 0 ? (
             <>
               <div className="image-review-controls">
@@ -2188,6 +2197,8 @@ function CourseImagesPanel() {
                         <strong>{item.heading}</strong>
                       </label>
                       <small>{item.chapter}</small>
+                      {item.intended_scene && <span className="image-scene-hint"><strong>Intended photograph: </strong>{item.intended_scene}</span>}
+                      <small><strong>Stock search:</strong> {item.search}</small>
                       <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
                       {item.author && <small>Photo: {item.author}</small>}
                       {item.source_url?.startsWith("https://") && <a href={item.source_url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>View source and licence</a>}
@@ -2208,7 +2219,15 @@ function CourseImagesPanel() {
                 ))}
               </div>
             </>
-          ) : <p className="image-cost-notice">No matching photographs were found. The Word output can still be downloaded unchanged.</p>}
+          ) : <p className="image-cost-notice">No sufficiently relevant photographs were retrieved from the current free searches. Try a specific course title and use the suggested search links below. The Word document is unchanged.</p>}
+          {Array.isArray(reviewJob.details?.missing_images) && reviewJob.details.missing_images.length > 0 && (
+            <details className="image-result-warnings" open={candidates.length === 0}>
+              <summary>Open free searches for {reviewJob.details.missing_images.length} headings without photos</summary>
+              <ul>{reviewJob.details.missing_images.map((missing: any, index: number) => (
+                <li key={index}><strong>{missing.heading}</strong> ({missing.chapter}) — suggested search: <em>{missing.search}</em>. <a href={missing.pixabay_url} target="_blank" rel="noopener noreferrer">Pixabay photos</a> · <a href={missing.pexels_url} target="_blank" rel="noopener noreferrer">Pexels photos</a> · <a href={missing.stocksnap_url} target="_blank" rel="noopener noreferrer">StockSnap photos</a></li>
+              ))}</ul>
+            </details>
+          )}
           {Array.isArray(reviewJob.details?.warnings) && reviewJob.details.warnings.length > 0 && (
             <details className="image-result-warnings"><summary>Show search notices ({reviewJob.details.warnings.length})</summary>
               <ul>{reviewJob.details.warnings.map((notice: string, index: number) => <li key={index}>{notice}</li>)}</ul>

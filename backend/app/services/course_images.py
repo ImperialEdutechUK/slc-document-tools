@@ -33,6 +33,7 @@ from .zip_utils import normalise_zip_name, safe_zip_member
 from .course_image_integrations import FreepikImages, OpenRouterScenes, freepik_connection
 from .course_image_library import ImageLibrary, SavedImage
 from .free_stock_sources import find_pixabay, find_openverse
+from .course_visual_context import contextual_scene
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
@@ -44,6 +45,7 @@ SKIP_HEADING = re.compile(
     r"table of contents|contents|resources for further reference|"
     r"cover page|title page|acknowledgements?)\b", re.I
 )
+SKIP_ONLY_HEADING = re.compile(r"\b(learning outcomes?|learning objectives?|assessment criteria)\b", re.I)
 SKIP_DOC = re.compile(r"\b(assignment[\s_-]*brief|written[\s_-]*assignment[\s_-]*template)\b", re.I)
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z'-]+")
 STOPWORDS = frozenset(
@@ -90,6 +92,10 @@ class ImagePlan:
     @property
     def stocksnap_link(self) -> str:
         return "https://stocksnap.io/search/" + quote_plus(self.search.strip())
+
+    @property
+    def pixabay_link(self) -> str:
+        return "https://pixabay.com/images/search/" + quote(self.search.strip(), safe="") + "/"
 
 
 @dataclass
@@ -138,6 +144,13 @@ class Provider:
     generations_used: int = 0
     refined_sections: int = 0
     used_photos: set[str] = field(default_factory=set)
+    # Provider counts are actual source calls, not the number of headings checked.
+    provider_attempts: dict[str, int] = field(default_factory=lambda: {
+        "Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0,
+    })
+    provider_successes: dict[str, int] = field(default_factory=lambda: {
+        "Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0,
+    })
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -181,14 +194,17 @@ class Provider:
                 self.library_hits += 1
                 return Picture(saved.payload, saved.source, saved.source_url, saved.identifier, saved.licence, saved.author, reused=True)
         if source in {"mixed", "free", "pexels"} and self.pexels_key:
+            self.provider_attempts["Pexels"] += 1
             try:
                 found = self._stock(query, portrait=portrait, subject=subject)
                 if found:
+                    self.provider_successes["Pexels"] += 1
                     self._remember(query, subject, found, portrait=portrait)
                     return found
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Pexels lookup was unsuccessful: {type(exc).__name__}.")
         if source in {"mixed", "free", "pixabay"} and self.pixabay_key:
+            self.provider_attempts["Pixabay"] += 1
             try:
                 result = find_pixabay(
                     self.pixabay_key, query, subject, self.used_photos,
@@ -198,11 +214,13 @@ class Provider:
                     raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
                     found = Picture(raw, "Pixabay", page, identifier, licence, author)
+                    self.provider_successes["Pixabay"] += 1
                     self._remember(query, subject, found, portrait=portrait)
                     return found
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Pixabay lookup was unsuccessful: {type(exc).__name__}.")
         if source in {"mixed", "free", "openverse"} and self.openverse_enabled:
+            self.provider_attempts["Openverse"] += 1
             try:
                 result = find_openverse(
                     query, subject, self.used_photos,
@@ -212,6 +230,7 @@ class Provider:
                     raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
                     found = Picture(raw, "Openverse", page, identifier, licence, author)
+                    self.provider_successes["Openverse"] += 1
                     self._remember(query, subject, found, portrait=portrait)
                     return found
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
@@ -234,12 +253,13 @@ class Provider:
                     raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
                     self.freepik_downloads += 1
+                    self.provider_successes["Freepik"] += 1
                     return Picture(raw, "Freepik", page, identifier, licence, author)
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Freepik stock lookup was unsuccessful: {type(exc).__name__}.")
         return None
 
-    def refine_plans(self, course: str, chapter: str, plans: list[ImagePlan]) -> None:
+    def refine_plans(self, course: str, chapter: str, plans: list[ImagePlan], chapter_overview: str = "") -> None:
         """Use OpenRouter only when explicitly requested; preserve original headings."""
         if not self.openrouter_key:
             self.warnings.append("OpenRouter refinement requested but OPENROUTER_API_KEY is not configured; used local scene suggestions.")
@@ -249,10 +269,10 @@ class Provider:
             for start in range(0, len(plans), 10):
                 chunk = plans[start:start + 10]
                 items = [
-                    {"id": i, "heading": plan.heading[:160], "excerpt": plan.context[:340]}
+                    {"id": i, "heading": plan.heading[:160], "excerpt": plan.context[:750]}
                     for i, plan in enumerate(chunk)
                 ]
-                proposed = planner.improve(course, chapter, items)
+                proposed = planner.improve(course, chapter, items, chapter_overview=chapter_overview[:1600])
                 for suggestion in proposed:
                     if not isinstance(suggestion, dict):
                         continue
@@ -265,13 +285,19 @@ class Provider:
                         continue
                     search = " ".join(search.split())[:110]
                     photo = " ".join(photo.split())[:450]
-                    heading_tokens = set(_tokens(chunk[index].heading))
-                    answer_tokens = set(_tokens(search + " " + photo))
+                    # A photo can represent the heading without repeating its
+                    # academic words. Require overlap with the heading OR
+                    # supporting paragraph OR initial contextual scene, while
+                    # rejecting unrelated subjects (e.g. jazz for consent).
+                    grounding = set(_tokens(
+                        chunk[index].heading + " " + chunk[index].context + " " + chunk[index].search
+                    )) - {"professional", "workplace", "people", "person", "realistic", "natural", "photo", "scene"}
+                    proposal = set(_tokens(search + " " + photo))
                     if not (3 <= len(search) <= 110 and 25 <= len(photo) <= 450):
                         continue
-                    if heading_tokens and not heading_tokens & answer_tokens:
+                    if grounding and not (grounding & proposal):
                         continue
-                    if "http:" in photo.lower() or "https:" in photo.lower():
+                    if any(mark in (search + " " + photo).lower() for mark in ("http:", "https:", "<script")):
                         continue
                     chunk[index].search = search
                     chunk[index].description = photo
@@ -290,23 +316,22 @@ class Provider:
             response.raise_for_status()
             result = response.json()
             photos = result.get("photos") or []
+            # Pexels does not provide detailed title/tag metadata. `alt` is
+            # optional and cannot be used as a hard relevancy gate: a useful
+            # API-ranked photograph may have an empty caption. Prefer overlap
+            # when present, but ALWAYS allow the best provider-ranked results
+            # into the user's review queue. Nothing is auto-approved.
             tokens = set(_tokens(query))
-            # For automatic insertion, a search-result caption must mention a
-            # meaningful term from the requested heading/cover subject, not
-            # merely generic terms such as 'workplace' or 'professional'.
-            topic_tokens = set(_tokens(subject)) - {"workplace", "professional", "course", "setting", "settings"}
             ranked: list[tuple[int, dict]] = []
-            for photo in photos:
+            for order, photo in enumerate(photos):
                 identifier = str(photo.get("id", ""))
                 if not identifier or f"pexels:{identifier}" in self.used_photos:
                     continue
-                alt = set(_tokens(str(photo.get("alt", ""))))
-                # Don't silently accept unrelated search hits. A relevant
-                # subject token must be represented in Pexels' photo caption.
-                overlap = len(tokens & alt)
-                if overlap < 1:
-                    continue
-                ranked.append((overlap, photo))
+                caption = " ".join((str(photo.get("alt") or ""),
+                                    str(photo.get("url") or "").replace("-", " ")))
+                overlap = len(tokens & set(_tokens(caption)))
+                # Prefer matches, then preserve Pexels' own relevance order.
+                ranked.append((overlap * 100 - order, photo))
             ranked.sort(key=lambda pair: pair[0], reverse=True)
             for _, photo in ranked[:5]:
                 src = photo.get("src") or {}
@@ -501,6 +526,36 @@ def _heading_level(paragraph: Paragraph) -> int | None:
     return 1
 
 
+def _conflict_visual(heading: str, context: str) -> tuple[str, str] | None:
+    """Translate abstract professional conflict concepts into visible actions.
+
+    Source headings remain unchanged. Query terms describe a *photograph*, not
+    a paraphrase of learning outcomes or the full academic heading.
+    """
+    if not re.search(r"conflict|disagreement|dispute|mediat|negotiat|resolution", context, re.I):
+        return None
+    options = (
+        (r"avoid|withdraw|delaying|pause|not acting", "thoughtful employee office conversation",
+         "a professional listening carefully before responding to a workplace disagreement"),
+        (r"compet|direct|authority|assertiv|decisive", "manager leading office meeting",
+         "a manager giving clear instructions to colleagues during a workplace discussion"),
+        (r"collaborat|together|joint|underlying needs", "colleagues solving problem meeting",
+         "a small team working together around a table to resolve an issue"),
+        (r"negotiat|compromis|agreement|mediat", "business negotiation discussion",
+         "two professionals discussing a possible workplace agreement"),
+        (r"mistake|error|misunderstand|pitfall", "colleagues workplace disagreement",
+         "two colleagues discussing a workplace disagreement respectfully"),
+        (r"select|choos|proportionat|appropriate approach|decision", "business team decision meeting",
+         "a team leader and colleagues deciding how to handle a workplace situation"),
+        (r"conflict|disagreement|resolution|management", "office mediation discussion",
+         "colleagues engaging in a calm, professional workplace conversation"),
+    )
+    for expression, search, action in options:
+        if re.search(expression, heading, re.I):
+            return search, action
+    return "office team discussion", "work colleagues discussing how to handle a disagreement"
+
+
 def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
     combined = (course + " " + heading).lower()
     if any(w in combined for w in ("confidential", "information", "data protection", "records")):
@@ -527,6 +582,23 @@ def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
         setting = "realistic workplace appropriate to the course topic"
         action = "people, activities or equipment demonstrating the specific heading"
         stock_tags = "professional work"
+    # Conflict handling is a *course/topic* decision. A passing mention of a
+    # disagreement in the body of a safeguarding or HR section must not force
+    # an unrelated generic office-mediation image.
+    conflict = _conflict_visual(heading, combined)
+    if conflict and not re.search(r"safeguard|care settings|social care|child|healthcare|nursery|school|eyfs", course, re.I):
+        search, action = conflict
+        description = (
+            f"An ultra-realistic, natural landscape photograph for '{heading}', "
+            f"showing {action}. Credible workplace and believable human interaction. "
+            "No promotional text, watermarks, or legible private data."
+        )
+        return search, description
+    # Use the course's professional discipline to ground each image, instead
+    # of searching academic headings as if they were stock-photo keywords.
+    specific = contextual_scene(course, heading, excerpt)
+    if specific is not None:
+        return specific.search, specific.description
     # Tie each shot to the heading's meaning, not just the course. The
     # surrounding chapter text is used as context, never altered or invented.
     heading_lower = heading.lower()
@@ -567,8 +639,12 @@ def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
     query = next((photo_query for pattern, photo_query in photo_subjects
                   if re.search(pattern, heading.lower(), re.I)), "")
     if not query:
-        topic_tokens = _tokens(heading)[:2] or _tokens(excerpt)[:2]
-        query = " ".join(dict.fromkeys(topic_tokens + _tokens(stock_tags)[:3]))[:80]
+        # Prefer a broad observable photograph when an abstract heading has
+        # no subject-specific scene. Academic wording is not a stock-photo tag.
+        heading_tokens = [token for token in _tokens(heading)
+                          if token not in {"when", "required", "would", "could", "selected", "right", "approach", "outcomes", "method"}]
+        topic_tokens = heading_tokens[:1] if heading_tokens else []
+        query = " ".join(dict.fromkeys(_tokens(stock_tags)[:3] + topic_tokens))[:80]
     if not query:
         query = stock_tags
     description = (
@@ -579,8 +655,39 @@ def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
     return query, description
 
 
+def _chapter_overview(document: Document) -> str:
+    """Scan the *whole* chapter, retaining a bounded cross-section of its topic.
+
+    Reading body text matters: a heading alone may be abstract. The sampled
+    passages are used for subject classification, never sent to a stock-photo
+    provider as a literal search phrase.
+    """
+    body: list[str] = []
+    excluded_level: int | None = None
+    for p in document.paragraphs:
+        phrase = " ".join(p.text.split())
+        if not phrase:
+            continue
+        level = _heading_level(p)
+        if level is not None:
+            if SKIP_HEADING.search(phrase):
+                excluded_level = level
+            elif excluded_level is not None and level <= excluded_level:
+                excluded_level = None
+            continue
+        if excluded_level is None and len(phrase) > 30:
+            body.append(phrase[:350])
+    if not body:
+        return ""
+    # Include intro, intermediate concepts and final teaching content, rather
+    # than relying only on the first paragraph of the first section.
+    picks = list(dict.fromkeys([0, 1, len(body)//3, len(body)//2, 2*len(body)//3, len(body)-1]))
+    return " ".join(body[i] for i in picks if 0 <= i < len(body))[:1600]
+
+
 def _plans(document: Document, course_title: str) -> tuple[list[ImagePlan], int]:
     paragraphs = document.paragraphs
+    chapter_overview = _chapter_overview(document)
     eligible: list[ImagePlan] = []
     excluded_level: int | None = None
     for i, p in enumerate(paragraphs):
@@ -589,6 +696,8 @@ def _plans(document: Document, course_title: str) -> tuple[list[ImagePlan], int]
             continue
         level = _heading_level(p)
         if level is None:
+            continue
+        if SKIP_ONLY_HEADING.search(text):
             continue
         if SKIP_HEADING.search(text):
             excluded_level = level
@@ -600,25 +709,43 @@ def _plans(document: Document, course_title: str) -> tuple[list[ImagePlan], int]
         if _picture_after_heading(paragraphs, i):
             continue
         context_items = []
-        for following in paragraphs[i + 1:i + 7]:
+        for following in paragraphs[i + 1:i + 13]:
             if _heading_level(following) is not None:
                 break
             if following.text.strip():
                 context_items.append(" ".join(following.text.split()))
-            if sum(len(x) for x in context_items) >= 380:
+            if sum(len(x) for x in context_items) >= 1000:
                 break
-        excerpt = " ".join(context_items)[:450]
+        excerpt = " ".join(context_items)[:1100]
         # Heading-only chapter dividers have no instructional content under
         # them and should not receive filler or decorative photography.
         if not excerpt:
             continue
         query, description = _scene_context(course_title, text, excerpt)
+        # If the supplied filename has no recognisable discipline, the chapter
+        # overview can still identify it without changing the original title.
+        if not contextual_scene(course_title, text, excerpt) and chapter_overview:
+            subject = contextual_scene("Unit", text, excerpt, chapter_overview)
+            if subject:
+                query, description = subject.search, subject.description
         eligible.append(ImagePlan(i, text, query, description, f"Immediately below the heading '{text}' in the original Word document.", excerpt))
     count = math.ceil(len(eligible) * 0.5)
     if not count:
         return [], len(eligible)
-    selected = [eligible[min(len(eligible) - 1, int((i + 0.5) * len(eligible) / count))] for i in range(count)]
-    return selected, len(eligible)
+    # Approximately half the relevant headings, spread through the chapter.
+    # Prefer distinctive scenes over several near-identical stock searches.
+    chosen: set[int] = set()
+    used_queries: set[str] = set()
+    for index in range(count):
+        middle = min(len(eligible) - 1, int((index + 0.5) * len(eligible) / count))
+        options = sorted((j for j in range(len(eligible)) if j not in chosen),
+                         key=lambda j: (eligible[j].search in used_queries,
+                                        abs(j - middle), j))
+        if options:
+            selected_index = options[0]
+            chosen.add(selected_index)
+            used_queries.add(eligible[selected_index].search)
+    return [eligible[j] for j in sorted(chosen)], len(eligible)
 
 
 def _hyperlink(paragraph: Paragraph, label: str, url: str) -> None:
@@ -862,7 +989,7 @@ def build_course_image_package(
             document = Document(BytesIO(chapter.payload))
             plans, eligible_count = _plans(document, course_title + " " + chapter.title)
             if use_openrouter and plans:
-                provider.refine_plans(course_title, chapter.title, plans)
+                provider.refine_plans(course_title, chapter.title, plans, chapter_overview=_chapter_overview(document))
             total_recommended += len(plans)
             acquired: dict[int, Picture] = {}
             if mode == "insert":
