@@ -58,35 +58,18 @@ class ImageIntegrationTests(unittest.TestCase):
         self.assertTrue(any("download/jpg" in request for request in sent))
         self.assertFalse(any("preview.jpg" in request or "/21/" in request for request in sent))
 
-    def test_generated_image_polls_task_and_caps_paid_attempts(self):
-        paths = []
-        def handler(request):
-            paths.append(request.url.path)
-            if request.method == "POST":
-                self.assertEqual(request.headers.get("x-magnific-api-key"), "magnific-test")
-                posted = json.loads(request.content)
-                self.assertEqual(posted["width"], 1280)
-                self.assertEqual(posted["height"], 800)
-                return httpx.Response(200, json={"data": {"task_id": "task-123456789", "status": "CREATED"}})
-            if request.url.path.endswith("task-123456789"):
-                state = "COMPLETED" if paths.count(request.url.path) >= 2 else "IN_PROGRESS"
-                generated = ["https://ai-statics.freepik.com/completed.jpg"] if state == "COMPLETED" else []
-                return httpx.Response(200, json={"data": {"status": state, "generated": generated}})
-            if str(request.url) == "https://ai-statics.freepik.com/completed.jpg":
-                return httpx.Response(200, content=jpg(), headers={"content-type": "image/jpeg"})
-            raise AssertionError(str(request.url))
-
-        with patch.dict(os.environ, {"MAGNIFIC_API_KEY": "magnific-test", "FREEPIK_API_KEY": ""}):
-            with patch("app.services.course_image_integrations.httpx.Client", side_effect=client_with_transport(handler)), \
-                 patch("app.services.course_image_integrations.time.sleep"):
-                provider = Provider(pexels_key="", freepik_key="magnific-test", openai_key="", stock_source="generate", max_generations=1)
-                picture = provider.find("records security", generate=True, prompt="Secure care records cabinet")
-                self.assertIsNotNone(picture)
-                self.assertEqual(picture.source, "Freepik AI-generated")
-                self.assertEqual(provider.generations_used, 1)
-                self.assertIsNone(provider.find("another records scene", generate=True))
-        self.assertEqual(paths.count("/v1/ai/text-to-image/flux-2-pro"), 1)
-        self.assertTrue(any("generation limit" in item.lower() for item in provider.warnings))
+    def test_paid_ai_generation_is_disabled_for_course_image_workflow(self):
+        # The original generated-image test predates the no-AI-generation rule.
+        # A production request must never bill the Freepik AI endpoint.
+        with patch("app.services.course_image_integrations.httpx.Client") as client:
+            provider = Provider(
+                pexels_key="", pixabay_key="", freepik_key="magnific-test",
+                openverse_enabled=False, openai_key="", stock_source="generate",
+                max_generations=1,
+            )
+            self.assertIsNone(provider.find("records security", generate=True))
+            self.assertEqual(provider.generations_used, 0)
+            client.assert_not_called()
 
     def test_openrouter_refines_search_without_changing_headings(self):
         def handler(request):

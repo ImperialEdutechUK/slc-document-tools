@@ -1,3 +1,5 @@
+> **Current workflow (v24):** For the free-first sources, persistent library, preview-and-confirm steps, and no-AI-generation policy, read [FREE_FIRST_IMAGE_WORKFLOW.md](FREE_FIRST_IMAGE_WORKFLOW.md). Some API/generation descriptions below document the legacy workflow and are no longer active in Find & Add Images.
+
 # Find & Add Images — new document workflow
 
 The existing Document Formatter, Word → PDF, PDF Editor and Replace PDF Cover workflows are unchanged. Use the new **Find & Add Images** tab for chapters that lack photographs. This option implements the rules from `COURSE_IMAGE_MASTER_PROMPT.txt`.

@@ -125,7 +125,7 @@ class CourseImagesTests(unittest.TestCase):
         self.assertEqual(result.details["photos_inserted"], 1)
 
     def test_no_api_keys_is_clearly_reported_not_faked(self):
-        no_provider = Provider(pexels_key="", openai_key="")
+        no_provider = Provider(pexels_key="", pixabay_key="", freepik_key="", openverse_enabled=False, openai_key="", reuse_existing=False)
         result = build_course_image_package(chapter(), "Lesson.docx", provider=no_provider)
         self.assertEqual(result.details["covers_prepared"], 0)
         self.assertTrue(any("cover" in w.lower() for w in result.details["warnings"]))

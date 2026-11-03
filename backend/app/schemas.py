@@ -44,3 +44,7 @@ class CleanSpacingRequest(BaseModel):
     remove_extra_blanks: bool = True
     remove_multi_breaks: bool = True
     fix_orphan_headings: bool = True
+
+
+class ConfirmCourseImagePreviewRequest(BaseModel):
+    selected_ids: list[int] = Field(default_factory=list, max_length=60)

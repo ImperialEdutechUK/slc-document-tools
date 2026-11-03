@@ -31,6 +31,8 @@ from docx.text.paragraph import Paragraph
 
 from .zip_utils import normalise_zip_name, safe_zip_member
 from .course_image_integrations import FreepikImages, OpenRouterScenes, freepik_connection
+from .course_image_library import ImageLibrary, SavedImage
+from .free_stock_sources import find_pixabay, find_openverse
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
@@ -97,6 +99,7 @@ class Picture:
     identifier: str = ""
     licence: str = ""
     author: str = ""
+    reused: bool = False
 
 
 @dataclass
@@ -111,13 +114,20 @@ class Provider:
     """Try a relevant free stock photograph, then optionally generated imagery."""
 
     pexels_key: str = field(default_factory=lambda: os.getenv("PEXELS_API_KEY", "").strip())
+    pixabay_key: str = field(default_factory=lambda: os.getenv("PIXABAY_API_KEY", "").strip())
+    openverse_enabled: bool = field(default_factory=lambda: os.getenv("OPENVERSE_ENABLED", "true").lower() in {"1", "true", "yes"})
     openai_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
     image_model: str = field(default_factory=lambda: os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2.5-flare"))
     freepik_key: str = field(default_factory=lambda: freepik_connection()[0])
     freepik_model: str = field(default_factory=lambda: os.getenv("FREEPIK_IMAGE_MODEL", "flux-2-pro").strip())
     openrouter_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", "").strip())
     openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip())
-    stock_source: str = "auto"
+    stock_source: str = "mixed"
+    reuse_existing: bool = True
+    library: ImageLibrary = field(default_factory=ImageLibrary)
+    library_hits: int = 0
+    freepik_downloads: int = 0
+    freepik_limit: int = field(default_factory=lambda: max(0, min(30, int(os.getenv("COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS", "3")))))
     max_generations: int = field(default_factory=lambda: max(0, min(30, int(os.getenv("COURSE_IMAGE_MAX_GENERATIONS", "8")))))
     generations_used: int = 0
     refined_sections: int = 0
@@ -126,45 +136,97 @@ class Provider:
 
     @property
     def available(self) -> bool:
-        return bool(self.pexels_key or self.freepik_key or self.openai_key)
+        return bool(self.pexels_key or self.pixabay_key or self.openverse_enabled or self.freepik_key)
 
     def can_acquire(self, *, generate: bool) -> bool:
-        if self.stock_source == "generate":
-            return bool(self.freepik_key or self.openai_key)
-        stock_available = (
-            (self.stock_source in {"auto", "pexels"} and bool(self.pexels_key))
-            or (self.stock_source in {"auto", "freepik"} and bool(self.freepik_key))
+        source = "mixed" if self.stock_source == "auto" else self.stock_source
+        if source == "generate":
+            return False  # Paid AI generation deliberately disabled for this workflow.
+        return bool(
+            (source in {"mixed", "free", "pexels"} and self.pexels_key)
+            or (source in {"mixed", "free", "pixabay"} and self.pixabay_key)
+            or (source in {"mixed", "free", "openverse"} and self.openverse_enabled)
+            or (source in {"mixed", "freepik"} and self.freepik_key and self.freepik_limit > 0)
         )
-        return stock_available or (generate and bool(self.freepik_key or self.openai_key))
 
     def _freepik(self) -> FreepikImages:
         _, base, header = freepik_connection()
         return FreepikImages(self.freepik_key, base=base, header=header)
 
+    def _remember(self, query: str, subject: str, picture: Picture, *, portrait: bool) -> None:
+        if self.reuse_existing:
+            self.library.save(
+                query, subject,
+                SavedImage(picture.payload, picture.source, picture.source_url, picture.identifier, picture.licence, picture.author),
+                portrait=portrait,
+            )
+
     def find(
         self, query: str, *, portrait: bool = False, generate: bool = True,
         prompt: str = "", subject: str = "",
     ) -> Picture | None:
-        if self.stock_source in {"auto", "pexels"} and self.pexels_key:
+        source = "mixed" if self.stock_source == "auto" else self.stock_source
+        allow_free = source in {"mixed", "free", "pexels", "pixabay", "openverse"}
+        if allow_free and self.reuse_existing:
+            saved = self.library.find(query, subject, portrait=portrait)
+            if saved and saved.identifier not in self.used_photos:
+                self.used_photos.add(saved.identifier)
+                self.library_hits += 1
+                return Picture(saved.payload, saved.source, saved.source_url, saved.identifier, saved.licence, saved.author, reused=True)
+        if source in {"mixed", "free", "pexels"} and self.pexels_key:
             try:
                 found = self._stock(query, portrait=portrait, subject=subject)
                 if found:
+                    self._remember(query, subject, found, portrait=portrait)
                     return found
-            except (httpx.HTTPError, ValueError, OSError) as exc:
+            except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Pexels lookup was unsuccessful: {type(exc).__name__}.")
-        if self.stock_source in {"auto", "freepik"} and self.freepik_key:
+        if source in {"mixed", "free", "pixabay"} and self.pixabay_key:
             try:
-                result = self._freepik().search_photo(
-                    query, subject=subject, portrait=portrait, used=self.used_photos,
-                    normalise=lambda raw: _normalised_image(raw, portrait=portrait),
+                result = find_pixabay(
+                    self.pixabay_key, query, subject, self.used_photos,
+                    portrait=portrait, normalise=lambda raw: _normalised_image(raw, portrait=portrait),
                 )
                 if result:
                     raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
+                    found = Picture(raw, "Pixabay", page, identifier, licence, author)
+                    self._remember(query, subject, found, portrait=portrait)
+                    return found
+            except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+                self.warnings.append(f"Pixabay lookup was unsuccessful: {type(exc).__name__}.")
+        if source in {"mixed", "free", "openverse"} and self.openverse_enabled:
+            try:
+                result = find_openverse(
+                    query, subject, self.used_photos,
+                    portrait=portrait, normalise=lambda raw: _normalised_image(raw, portrait=portrait),
+                )
+                if result:
+                    raw, page, identifier, licence, author = result
+                    self.used_photos.add(identifier)
+                    found = Picture(raw, "Openverse", page, identifier, licence, author)
+                    self._remember(query, subject, found, portrait=portrait)
+                    return found
+            except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+                self.warnings.append(f"Openverse lookup was unsuccessful: {type(exc).__name__}.")
+        # Licensed Freepik stock is the final fallback. No AI generation call is made.
+        if source in {"mixed", "freepik"} and self.freepik_key:
+            if self.freepik_downloads >= self.freepik_limit:
+                self.warnings.append("Freepik stock download limit reached for this job; no further paid fallback attempted.")
+                return None
+            try:
+                result = self._freepik().search_photo(
+                    query, subject=subject, portrait=portrait, used=self.used_photos,
+                    normalise=lambda raw: _normalised_image(raw, portrait=portrait),
+                    max_candidates=1,  # Avoid several licensed downloads while searching one heading.
+                )
+                if result:
+                    raw, page, identifier, licence, author = result
+                    self.used_photos.add(identifier)
+                    self.freepik_downloads += 1
                     return Picture(raw, "Freepik", page, identifier, licence, author)
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Freepik stock lookup was unsuccessful: {type(exc).__name__}.")
-        # AI image generation disabled. Stock searches only; no generation API calls.
         return None
 
     def refine_plans(self, course: str, chapter: str, plans: list[ImagePlan]) -> None:
@@ -232,7 +294,7 @@ class Provider:
                 # Don't silently accept unrelated search hits. A relevant
                 # subject token must be represented in Pexels' photo caption.
                 overlap = len(tokens & alt)
-                if overlap < 1 or (topic_tokens and not (topic_tokens & alt)):
+                if overlap < 1:
                     continue
                 ranked.append((overlap, photo))
             ranked.sort(key=lambda pair: pair[0], reverse=True)
@@ -256,7 +318,7 @@ class Provider:
                     continue
                 identifier = str(photo["id"])
                 self.used_photos.add(f"pexels:{identifier}")
-                return Picture(payload, "Pexels", str(photo.get("url", "")), f"pexels:{identifier}")
+                return Picture(payload, "Pexels", str(photo.get("url", "")), f"pexels:{identifier}", "Pexels License", str(photo.get("photographer") or "")[:100])
         return None
 
     def _generate(self, prompt: str, *, portrait: bool) -> Picture:
@@ -664,13 +726,13 @@ def _cover_for_course(
 def build_course_image_package(
     raw: bytes, filename: str, *, course_name: str = "", mode: str = "guides",
     generate_missing: bool = True, cover_upload: bytes | None = None,
-    image_source: str = "auto", use_openrouter: bool = False,
+    image_source: str = "mixed", use_openrouter: bool = False, reuse_existing: bool = True,
     provider: Provider | None = None,
 ) -> CourseImagesResult:
     """Return edited Word documents directly, or separate guide+cover assets."""
     if mode not in {"guides", "insert"}:
         raise CourseImagesError("Choose search guides or automatic image insertion.")
-    if image_source not in {"auto", "pexels", "freepik", "generate"}:
+    if image_source not in {"mixed", "auto", "free", "pexels", "pixabay", "openverse", "freepik", "generate"}:
         raise CourseImagesError("Choose a valid stock image or generation source.")
     if not raw:
         raise CourseImagesError("The uploaded document is empty.")
@@ -681,14 +743,14 @@ def build_course_image_package(
         provided_covers = [("uploaded_cover.png", cover_upload)]
     provider = provider if provider is not None else Provider()
     provider.stock_source = image_source
+    provider.reuse_existing = reuse_existing
     if image_source == "generate":
         raise CourseImagesError("AI image generation is currently disabled. Select a stock photo source.")
     generate_missing = False
     if mode == "insert" and not provider.can_acquire(generate=generate_missing):
         raise CourseImagesError(
-            "No compatible image provider is configured. Configure FREEPIK_API_KEY "
-            "(or MAGNIFIC_API_KEY), PEXELS_API_KEY, or OPENAI_API_KEY on the backend; "
-            "select a matching image source, or choose guides-only mode."
+            "No compatible image source is configured. Provide PEXELS_API_KEY or PIXABAY_API_KEY "
+            "(Openverse can also be enabled), or configure FREEPIK_API_KEY for licensed stock fallback."
         )
 
     enhanced: list[tuple[str, bytes]] = []
@@ -729,7 +791,7 @@ def build_course_image_package(
                         sources.append({
                             "chapter": chapter.filename, "heading": plan.heading,
                             "provider": photo.source, "source_url": photo.source_url,
-                            "licence": photo.licence, "author": photo.author,
+                            "licence": photo.licence, "author": photo.author, "reused": photo.reused,
                         })
                     else:
                         warnings.append(f"{chapter.filename}: no suitable image found for '{plan.heading}'.")
@@ -791,11 +853,15 @@ def build_course_image_package(
         "image_source": image_source,
         "openrouter_refined_sections": provider.refined_sections,
         "generation_attempts": provider.generations_used,
+        "freepik_stock_downloads": provider.freepik_downloads,
+        "image_library_hits": provider.library_hits,
+        "reuse_existing": reuse_existing,
         "image_sources": sources,
         "cover_sources": cover_sources,
         "warnings": list(dict.fromkeys(warnings)),
         "providers_configured": {
-            "pexels": bool(provider.pexels_key), "freepik": bool(provider.freepik_key),
+            "pexels": bool(provider.pexels_key), "pixabay": bool(provider.pixabay_key),
+            "openverse": provider.openverse_enabled, "freepik": bool(provider.freepik_key),
             "openrouter": bool(provider.openrouter_key), "openai": bool(provider.openai_key),
         },
     }

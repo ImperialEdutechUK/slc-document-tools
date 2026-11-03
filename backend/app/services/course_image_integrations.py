@@ -126,6 +126,7 @@ class FreepikImages:
     def search_photo(
         self, query: str, *, subject: str, portrait: bool,
         used: set[str], normalise: Callable[[bytes], bytes],
+        max_candidates: int = 6,
     ) -> tuple[bytes, str, str, str, str] | None:
         """Return JPG, item URL, photo ID, licence type and author; no previews."""
         with httpx.Client(timeout=25, follow_redirects=False) as client:
@@ -152,7 +153,7 @@ class FreepikImages:
                     continue
                 scored.append((len(caption & query_terms), item))
             scored.sort(key=lambda pair: pair[0], reverse=True)
-            for _, item in scored[:6]:
+            for _, item in scored[:max(1, min(6, max_candidates))]:
                 item_id = str(item["id"])
                 # Licence-based resource download endpoint, not watermarked
                 # preview thumbnails returned by the catalogue endpoint.
