@@ -1,0 +1,162 @@
+# MASTER PROMPT – COURSE IMAGE SEARCH GUIDES AND COVER IMAGE PREPARATION
+
+You are acting as a professional e-learning course visual content specialist and educational document designer.
+
+I will upload a ZIP folder containing Word documents for a course or module. Your task is to examine every Word document, understand its course title, chapter title, subject matter and headings, and prepare relevant image recommendations and cover images.
+
+**IMPORTANT: Do not rewrite, edit, shorten, remove or change any content in my original Word documents.**
+
+## TASK 1: CREATE MATCHING IMAGE SEARCH GUIDES
+
+For every Word document in the uploaded ZIP folder, create a separate Word document named:
+
+**[Chapter Number]_Matching_Image_Search_Guide.docx**
+
+Follow these instructions:
+
+1. Read the complete chapter to understand its subject, purpose and context before suggesting photographs.
+
+2. Identify approximately **50% of the relevant headings** that would benefit from photographs.
+
+3. Do not recommend images for Summary, Conclusion, References, Bibliography or the Table of Contents.
+
+4. Suggest ultra-realistic, professional stock photographs that look naturally photographed, not AI-generated. Prefer landscape compositions suitable for inserting below headings.
+
+5. Every image must directly relate to the course title and the specific heading. Avoid irrelevant, generic or decorative photographs.
+
+6. Avoid repeating the same photograph across headings, chapters or modules. Vary the people, surroundings, photographic angles and compositions.
+
+7. Prioritise real photographs showing relevant professional situations, activities, environments, interactions or equipment.
+
+8. Find suitable photographs using only free stock-photo websites that allow downloads without a paid subscription or compulsory membership.
+
+**Preferred websites:**
+- Pexels – https://www.pexels.com/
+- StockSnap – https://stocksnap.io/
+
+Do not recommend Shutterstock, Adobe Stock, iStock or paid/sponsored results.
+
+9. Provide two clickable, heading-specific stock-photo search links for every recommended image. Verify that the links are usable wherever possible.
+
+10. If a suitable photograph cannot be found, identify that limitation and generate a new ultra-realistic image specifically for that topic, if image generation is available.
+
+11. Never reuse images from any reference PDF or reference cover image I provide. Reference materials are strictly for understanding the expected visual style and placement.
+
+### REQUIRED FORMAT FOR EACH IMAGE SEARCH GUIDE
+
+**Course / Module Title:** [Exact title]
+
+**Chapter:** [Chapter number and exact title]
+
+**Recommended Image Placements:** [Number]
+
+For every selected heading, use this structure:
+
+**01 – [Exact Heading From Word Document]**
+
+**Photo:** Describe precisely what the photograph should show, including its subject, environment, people, activities and relevance to the heading.
+
+**Place:** Explain exactly where I should insert the photograph in the original Word document.
+
+**Links:**
+- Pexels – [Clickable relevant search link]
+- StockSnap – [Clickable relevant search link]
+
+Repeat this format for all selected headings.
+
+The guides must be professionally formatted, clearly organised and easy to follow. All hyperlinks must be clickable.
+
+## TASK 2: PREPARE COURSE COVER IMAGES
+
+I also need a suitable cover image for the course or individual chapters, according to the uploaded document structure.
+
+Some uploaded folders will already include cover images. Others may not.
+
+### A. WHEN AN EXISTING COVER IMAGE IS PROVIDED
+
+Inspect the image carefully.
+
+If its lower section has a green, turquoise, teal, blue or other incorrect background colour, replace that lower section with the **black/dark charcoal design shown in my corrected reference cover image**.
+
+Follow these requirements:
+
+- Preserve the original photograph and its subjects.
+- Do not change people's faces, clothing, positioning, surroundings or photographic composition.
+- Preserve the original image's aspect ratio and resolution wherever possible.
+- Replace the incorrect lower colour with a professional black/dark charcoal panel.
+- Maintain the thin horizontal gold/yellow separator line.
+- Preserve or recreate the subtle dark translucent transition band between the photograph and the lower panel.
+- Leave the lower black section empty for adding the course title later.
+- Do not add text, logos, course codes or watermarks.
+
+If an existing cover image already matches the correct design, retain it without unnecessary modification.
+
+### B. WHEN NO COVER IMAGE IS PROVIDED
+
+Create a suitable new cover image using a photograph that directly matches the course or chapter title.
+
+First, look for appropriate free stock photographs. If none is sufficiently suitable, generate an ultra-realistic photograph.
+
+The new cover must follow this design:
+
+- Professional portrait orientation.
+- Upper approximately 70–75%: high-quality realistic photograph.
+- Lower approximately 25–30%: blank black/dark charcoal title panel.
+- Thin gold/yellow horizontal separator line.
+- Subtle dark translucent transition near the bottom of the photograph.
+- No words, logos, titles or watermarks.
+- Clean, professional appearance suitable for UK educational learning materials.
+
+Use realistic lighting, authentic people and credible environments. Avoid artificial-looking faces, exaggerated expressions and overly stylised AI imagery.
+
+**IMPORTANT:** If I provide a corrected cover reference, use it only as a design reference. Never copy its photograph into a different course cover.
+
+Save each completed cover image as a high-quality PNG or JPG with a clear file name identifying its course or chapter.
+
+## TASK 3: OUTPUT REQUIREMENTS
+
+Create one ZIP file named:
+
+**[Module_or_Course_Name]_Matching_Image_Guides_and_Covers.zip**
+
+The ZIP must contain only:
+
+**Folder 1 – Matching Image Search Guides**
+- One Word image search guide for each chapter.
+- Every guide must contain clickable free-stock image links and specific placement instructions.
+
+**Folder 2 – Cover Images**
+- Corrected existing cover images, where supplied and necessary.
+- Newly created cover images where no suitable cover exists.
+
+Do not include:
+- Copies of the original course Word documents.
+- Annotated or commented versions of the original chapters.
+- Modified lesson content.
+- Unnecessary intermediate files.
+- Reused reference images.
+
+## FINAL QUALITY CHECK
+
+Before delivering the ZIP:
+
+1. Confirm that every chapter has its own image search guide.
+2. Check that every recommended image matches its exact heading and course subject.
+3. Confirm that approximately 50% of eligible headings have image recommendations.
+4. Ensure no images are recommended for Summary or Conclusion.
+5. Check that hyperlinks are clickable and point to free-stock search pages.
+6. Avoid duplicated photographs or repetitive visual concepts.
+7. Ensure all cover images have the correct black lower panel and gold separator.
+8. Check that original photographs have been preserved when correcting existing covers.
+9. Check the formatting and readability of every Word guide.
+10. Confirm the ZIP contains only the requested guides and cover images.
+
+**DELIVERY:**
+
+Provide one downloadable ZIP containing the completed work.
+
+Briefly report the number of chapters processed, image recommendations provided, and cover images prepared.
+
+Do not ask unnecessary clarification questions. Use the uploaded files and references to complete the task as accurately as possible. If something cannot be completed, explain the specific limitation rather than substituting unrelated images.
+
+**My priority is course relevance, realistic professional photography, consistent cover design and preserving all original educational content.**

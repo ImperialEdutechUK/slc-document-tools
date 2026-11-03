@@ -1,0 +1,2726 @@
+"use client";
+
+import {
+  DragEvent,
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+type Tab = "formatter" | "course-images" | "word-pdf" | "pdf-editor" | "pdf-replace";
+
+type JobResponse = {
+  id: string;
+  job_type: string;
+  status: string;
+  original_filename?: string | null;
+  output_filename?: string | null;
+  download_url?: string | null;
+  report_url?: string | null;
+  report?: string | null;
+  details?: Record<string, any>;
+  error_message?: string | null;
+};
+
+type EditableParagraph = {
+  index: number;
+  text: string;
+  style: string;
+  list_type: "bullet" | "number" | "none";
+  page_break_before: boolean;
+  keep_together: boolean;
+};
+
+type HistoryEntry = {
+  job_id: string;
+  job_type: string;
+  label: string;
+  filename: string | null;
+  download_url: string | null;
+  completed_at: string | null;
+  is_current: boolean;
+};
+
+type SpacingIssue = {
+  kind: "extra_blank" | "multi_break" | "blank_page" | "orphan_heading" | "split_paragraph";
+  paragraph_index: number;
+  description: string;
+};
+
+type FooterSettings = {
+  course_text: string;
+  copyright_text: string;
+  page_label: string;
+  footer_parts: number;
+  page_offset: number;
+  course_offset: number;
+  copyright_offset: number;
+};
+
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
+).replace(/\/$/, "");
+
+function apiUrl(path?: string | null) {
+  if (!path) return "#";
+  return path.startsWith("http") ? path : `${API_BASE}${path}`;
+}
+
+async function apiRequest(path: string, options: RequestInit) {
+  const response = await fetch(`${API_BASE}${path}`, options);
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      payload.detail ||
+        payload.error ||
+        "The request could not be completed."
+    );
+  }
+
+  return payload;
+}
+
+async function responseError(response: Response, fallback: string) {
+  const payload = await response.json().catch(() => ({}));
+  return payload.detail || payload.error || fallback;
+}
+
+/* -------------------------------------------------------
+   FILE / DRAG AND DROP HELPERS
+------------------------------------------------------- */
+
+function fileMatchesAccept(file: File, accept: string) {
+  if (!accept.trim()) return true;
+
+  const rules = accept
+    .split(",")
+    .map((rule) => rule.trim().toLowerCase())
+    .filter(Boolean);
+
+  const filename = file.name.toLowerCase();
+  const mime = file.type.toLowerCase();
+
+  return rules.some((rule) => {
+    if (rule.startsWith(".")) {
+      return filename.endsWith(rule);
+    }
+
+    if (rule.endsWith("/*")) {
+      const prefix = rule.slice(0, -1);
+      return mime.startsWith(prefix);
+    }
+
+    return mime === rule;
+  });
+}
+
+function FileField({
+  label,
+  accept,
+  multiple = false,
+  onChange,
+  help,
+}: {
+  label: string;
+  accept: string;
+  multiple?: boolean;
+  onChange: (files: File[]) => void;
+  help?: string;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [dropError, setDropError] = useState("");
+  const dragDepth = useRef(0);
+
+  function processFiles(files: File[]) {
+    setDropError("");
+
+    const accepted = files.filter((file) =>
+      fileMatchesAccept(file, accept)
+    );
+
+    const rejected = files.filter(
+      (file) => !fileMatchesAccept(file, accept)
+    );
+
+    if (accepted.length === 0) {
+      setDropError("Unsupported file type.");
+      return;
+    }
+
+    if (rejected.length > 0) {
+      setDropError(
+        `${rejected.length} unsupported file${
+          rejected.length === 1 ? "" : "s"
+        } ignored.`
+      );
+    }
+
+    if (multiple) {
+      onChange(accepted);
+    } else {
+      onChange([accepted[0]]);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    dragDepth.current = 0;
+    setDragging(false);
+
+    const files = Array.from(event.dataTransfer.files || []);
+    if (!files.length) return;
+
+    processFiles(files);
+  }
+
+  function handleDragEnter(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    dragDepth.current += 1;
+    setDragging(true);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    event.dataTransfer.dropEffect = "copy";
+    setDragging(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    dragDepth.current -= 1;
+
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0;
+      setDragging(false);
+    }
+  }
+
+  return (
+    <div className="file-field">
+      <span className="field-label">{label}</span>
+
+      <label
+        className={`drop-zone ${dragging ? "dragging" : ""}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <span className="upload-icon">{dragging ? "↓" : "⇧"}</span>
+
+        <span className="drop-zone-title">
+          {dragging
+            ? multiple
+              ? "Drop files here"
+              : "Drop file here"
+            : multiple
+            ? "Drag & drop files here or click to browse"
+            : "Drag & drop a file here or click to browse"}
+        </span>
+
+        <small>{help}</small>
+
+        <input
+          type="file"
+          accept={accept}
+          multiple={multiple}
+          onChange={(event) => {
+            const selected = Array.from(event.target.files || []);
+
+            if (selected.length) {
+              processFiles(selected);
+            }
+
+            event.target.value = "";
+          }}
+        />
+      </label>
+
+      {dropError && <small className="file-error">{dropError}</small>}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------
+   RESULT CARD
+------------------------------------------------------- */
+
+function JobResult({
+  job,
+  title = "Output ready",
+  downloadLabel = "Download output",
+}: {
+  job: JobResponse;
+  title?: string;
+  downloadLabel?: string;
+}) {
+  return (
+    <section className="result-card">
+      <div>
+        <span className="success-dot" />
+        <strong>{title}</strong>
+        <p>{job.output_filename}</p>
+        {job.details?.build && (
+          <small>Backend build: {job.details.build}</small>
+        )}
+      </div>
+
+      <div className="result-actions">
+        {job.download_url && (
+          <a
+            className="button primary"
+            href={apiUrl(job.download_url)}
+          >
+            {downloadLabel}
+          </a>
+        )}
+
+        {job.report_url && (
+          <a
+            className="button secondary"
+            href={apiUrl(job.report_url)}
+          >
+            Validation report
+          </a>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------
+   DOCUMENT FORMATTER + PREVIEW + PDF EXPORT
+------------------------------------------------------- */
+
+function FormatterPanel() {
+  const [document, setDocument] = useState<File | null>(null);
+  const [cover, setCover] = useState<File | null>(null);
+  const [images, setImages] = useState<File[]>([]);
+
+  const [awardingBody, setAwardingBody] = useState("");
+  const [courseName, setCourseName] = useState("");
+  const [chapter, setChapter] = useState("");
+  const [autoLinks, setAutoLinks] = useState(true);
+
+  const [busy, setBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [editorBusy, setEditorBusy] = useState(false);
+  const [editApplyBusy, setEditApplyBusy] = useState(false);
+
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+  const [pdfJob, setPdfJob] = useState<JobResponse | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editableParagraphs, setEditableParagraphs] = useState<EditableParagraph[]>([]);
+  const [selectedParagraphs, setSelectedParagraphs] = useState<number[]>([]);
+  const [editorSearch, setEditorSearch] = useState("");
+  const [editMessage, setEditMessage] = useState("");
+  const [textEditorOpen, setTextEditorOpen] = useState(false);
+  const [textDraft, setTextDraft] = useState("");
+  const [footerEditorOpen, setFooterEditorOpen] = useState(false);
+  const [footerBusy, setFooterBusy] = useState(false);
+  const [footerSettings, setFooterSettings] = useState<FooterSettings>({
+    course_text: "",
+    copyright_text: "© South London College Ltd",
+    page_label: " | Page",
+    footer_parts: 0,
+    page_offset: 0,
+    course_offset: 0,
+    copyright_offset: 0,
+  });
+
+  const [spacingEditorOpen, setSpacingEditorOpen] = useState(false);
+  const [spacingBusy, setSpacingBusy] = useState(false);
+  const [spacingIssues, setSpacingIssues] = useState<SpacingIssue[]>([]);
+  const [spacingChecked, setSpacingChecked] = useState(false);
+  const [spacingFixOpts, setSpacingFixOpts] = useState({
+    remove_extra_blanks: true,
+    remove_multi_breaks: true,
+    fix_orphan_headings: true,
+  });
+
+    const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
+
+    const batchMode = document?.name.toLowerCase().endsWith(".zip") ?? false;
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
+  function resetPostFormatWorkflow() {
+    setPdfJob(null);
+    setError("");
+    setEditorOpen(false);
+    setEditableParagraphs([]);
+    setSelectedParagraphs([]);
+    setEditorSearch("");
+    setEditMessage("");
+    setTextEditorOpen(false);
+    setTextDraft("");
+    setFooterEditorOpen(false);
+    setSpacingEditorOpen(false);
+    setSpacingIssues([]);
+    setSpacingChecked(false);
+    setHistory([]);
+    setHistoryOpen(false);
+    setFooterSettings({
+      course_text: "",
+      copyright_text: "© South London College Ltd",
+      page_label: " | Page",
+      footer_parts: 0,
+      page_offset: 0,
+      course_offset: 0,
+      copyright_offset: 0,
+    });
+    setPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+      return "";
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!document) return;
+
+    setBusy(true);
+    setError("");
+    setJob(null);
+    resetPostFormatWorkflow();
+
+    try {
+      const form = new FormData();
+
+      form.append("document", document);
+      form.append("awarding_body", awardingBody);
+      form.append("course_name", courseName);
+
+      if (!batchMode) {
+        form.append("chapter", chapter);
+      }
+
+      form.append("auto_download_links", String(autoLinks));
+
+      if (cover) {
+        form.append("cover_image", cover);
+      }
+
+      if (!batchMode) {
+        images.forEach((image) => {
+          form.append("images", image);
+        });
+      }
+
+      const result = await apiRequest(
+        batchMode
+          ? "/api/v1/formatter/batch"
+          : "/api/v1/formatter/format",
+        {
+          method: "POST",
+          body: form,
+        }
+      );
+
+      setJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Formatting failed."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generatePreview(jobId: string) {
+    setPreviewBusy(true);
+    setError("");
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/v1/jobs/${jobId}/preview`,
+        { method: "GET" }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          await responseError(response, "Preview could not be generated.")
+        );
+      }
+
+      const blob = await response.blob();
+      const nextPreviewUrl = URL.createObjectURL(blob);
+
+      setPreviewUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return nextPreviewUrl;
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Preview could not be generated."
+      );
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
+
+  async function previewFormattedDocument() {
+    if (!job || batchMode) return;
+    await generatePreview(job.id);
+  }
+
+  async function loadEditableParagraphs(jobId: string) {
+    setEditorBusy(true);
+    setError("");
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${jobId}/editable-paragraphs`,
+        { method: "GET" }
+      );
+      setEditableParagraphs(result.paragraphs || []);
+      setSelectedParagraphs([]);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The simple formatting editor could not be loaded."
+      );
+    } finally {
+      setEditorBusy(false);
+    }
+  }
+
+  async function toggleSimpleEditor() {
+    if (!job || batchMode) return;
+
+    if (editorOpen) {
+      setEditorOpen(false);
+      return;
+    }
+
+    setEditorOpen(true);
+    setEditMessage("");
+    await Promise.all([
+      loadEditableParagraphs(job.id),
+      history.length === 0 ? loadHistory(job.id) : Promise.resolve(),
+    ]);
+  }
+
+  function toggleParagraphSelection(index: number) {
+    setSelectedParagraphs((current) =>
+      current.includes(index)
+        ? current.filter((item) => item !== index)
+        : [...current, index]
+    );
+  }
+
+  async function applySimpleEdit(
+    action:
+      | "heading1"
+      | "bullets"
+      | "numbering"
+      | "references_bullets"
+      | "normal"
+      | "page_break_before"
+      | "remove_page_break_before"
+      | "keep_together"
+      | "allow_split"
+      | "blank_line_before"
+      | "blank_line_after"
+  ) {
+    if (!job || selectedParagraphs.length === 0) {
+      setError("Select at least one paragraph to edit.");
+      return;
+    }
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/simple-edit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paragraph_indices: selectedParagraphs,
+            action,
+          }),
+        }
+      );
+
+      setJob(result);
+      setEditMessage(
+        `${result.details?.simple_edit?.paragraphs_changed ?? selectedParagraphs.length} paragraph(s) updated.`
+      );
+      await Promise.all([loadHistory(result.id), loadEditableParagraphs(result.id)]);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "The formatting edit failed."
+      );
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  function openTextEditor() {
+    if (selectedParagraphs.length !== 1) {
+      setError("Select exactly one paragraph to edit its text.");
+      return;
+    }
+
+    const paragraph = editableParagraphs.find(
+      (item) => item.index === selectedParagraphs[0]
+    );
+    if (!paragraph) {
+      setError("The selected paragraph could not be found.");
+      return;
+    }
+
+    setError("");
+    setFooterEditorOpen(false);
+    setTextDraft(paragraph.text);
+    setTextEditorOpen(true);
+  }
+
+  async function saveTextEdit() {
+    if (!job || selectedParagraphs.length !== 1) {
+      setError("Select exactly one paragraph to edit its text.");
+      return;
+    }
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/edit-text`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paragraph_index: selectedParagraphs[0],
+            text: textDraft,
+          }),
+        }
+      );
+
+      setJob(result);
+      setTextEditorOpen(false);
+      setEditMessage(
+        "Text updated. Pressing Enter in the text box creates a new line in the document."
+      );
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The text edit failed.");
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  async function loadHistory(jobId: string) {
+    setHistoryBusy(true);
+    try {
+      const data = await apiRequest(`/api/v1/jobs/${jobId}/history`, { method: "GET" });
+      setHistory(data.history || []);
+    } catch {
+      // History is non-critical — silently ignore
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  async function revertToJob(entry: HistoryEntry) {
+    if (entry.is_current) return;
+    const reverted: JobResponse = {
+      id: entry.job_id,
+      job_type: entry.job_type,
+      status: "completed",
+      output_filename: entry.filename,
+      download_url: entry.download_url,
+    };
+    setJob(reverted);
+    setHistoryOpen(false);
+    setPdfJob(null);
+    setEditMessage("Reverted to: " + entry.label);
+    setSpacingChecked(false);
+    setSpacingIssues([]);
+    await loadHistory(entry.job_id);
+    await loadEditableParagraphs(entry.job_id);
+    await generatePreview(entry.job_id);
+  }
+
+    async function checkPageSpacing() {
+    if (!job) return;
+    setSpacingBusy(true);
+    setSpacingIssues([]);
+    setSpacingChecked(false);
+    try {
+      const data = await apiRequest(`/api/v1/jobs/${job.id}/spacing-issues`, { method: "GET" });
+      setSpacingIssues(data.issues || []);
+      setSpacingChecked(true);
+    } catch (err) {
+      setEditMessage(err instanceof Error ? err.message : "Spacing check failed.");
+    } finally {
+      setSpacingBusy(false);
+    }
+  }
+
+  async function applySpacingClean() {
+    if (!job) return;
+    setSpacingBusy(true);
+    try {
+      const result = await apiRequest(`/api/v1/jobs/${job.id}/clean-spacing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spacingFixOpts),
+      });
+      setJob(result);
+      setSpacingChecked(false);
+      setSpacingIssues([]);
+      setSpacingEditorOpen(false);
+      await loadHistory(result.id);
+      await previewFormattedDocument();
+    } catch (err) {
+      setEditMessage(err instanceof Error ? err.message : "Spacing clean failed.");
+    } finally {
+      setSpacingBusy(false);
+    }
+  }
+
+    async function toggleFooterEditor() {
+    if (!job) return;
+
+    if (footerEditorOpen) {
+      setFooterEditorOpen(false);
+      return;
+    }
+
+    setFooterBusy(true);
+    setError("");
+    setTextEditorOpen(false);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/footer-settings`,
+        { method: "GET" }
+      );
+      setFooterSettings({
+        course_text: result.course_text ?? "",
+        copyright_text:
+          result.copyright_text ?? "© South London College Ltd",
+        page_label: result.page_label ?? " | Page",
+        footer_parts: result.footer_parts ?? 0,
+        page_offset: result.page_offset ?? 0,
+        course_offset: result.course_offset ?? 0,
+        copyright_offset: result.copyright_offset ?? 0,
+      });
+      setFooterEditorOpen(true);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "The footer could not be loaded."
+      );
+    } finally {
+      setFooterBusy(false);
+    }
+  }
+
+  function adjustFooterOffset(
+    field: "page_offset" | "course_offset" | "copyright_offset",
+    delta: number
+  ) {
+    setFooterSettings((current) => ({
+      ...current,
+      [field]: Math.max(-6, Math.min(6, current[field] + delta)),
+    }));
+  }
+
+  function resetFooterOffsets() {
+    setFooterSettings((current) => ({
+      ...current,
+      page_offset: 0,
+      course_offset: 0,
+      copyright_offset: 0,
+    }));
+  }
+
+  function footerOffsetLabel(value: number) {
+    if (value === 0) return "Default";
+    return value < 0 ? `${Math.abs(value)} left` : `${value} right`;
+  }
+
+  async function saveFooterEdit() {
+    if (!job) return;
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/edit-footer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            course_text: footerSettings.course_text,
+            copyright_text: footerSettings.copyright_text,
+            page_label: footerSettings.page_label,
+            page_offset: footerSettings.page_offset,
+            course_offset: footerSettings.course_offset,
+            copyright_offset: footerSettings.copyright_offset,
+          }),
+        }
+      );
+
+      setJob(result);
+      setFooterEditorOpen(false);
+      setEditMessage("Footer updated on the document pages.");
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The footer edit failed.");
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  async function updateTableOfContents() {
+    if (!job) return;
+
+    setEditApplyBusy(true);
+    setError("");
+    setEditMessage("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/update-toc`,
+        { method: "POST" }
+      );
+      setJob(result);
+      setTextEditorOpen(false);
+      setFooterEditorOpen(false);
+      const tocDetails = result.details?.toc_update;
+      setEditMessage(
+        tocDetails?.exact_layout_refresh
+          ? `Table of Contents updated with ${tocDetails?.entries ?? 0} heading(s), including refreshed page numbers.`
+          : `Table of Contents rebuilt with ${tocDetails?.entries ?? 0} heading(s). Exact page numbers will refresh when opened in Word.`
+      );
+      await loadEditableParagraphs(result.id);
+      await generatePreview(result.id);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The Table of Contents could not be updated."
+      );
+    } finally {
+      setEditApplyBusy(false);
+    }
+  }
+
+  async function convertFormattedDocumentToPdf() {
+    if (!job || batchMode) return;
+
+    setPdfBusy(true);
+    setError("");
+    setPdfJob(null);
+
+    try {
+      const result = await apiRequest(
+        `/api/v1/jobs/${job.id}/convert-to-pdf`,
+        { method: "POST" }
+      );
+      setPdfJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "PDF conversion failed."
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  const imageDetails = job?.details?.images;
+  const linked = job?.details?.linked_images;
+  const batchDetails = batchMode ? job?.details : null;
+
+  const filteredEditableParagraphs = useMemo(() => {
+    const query = editorSearch.trim().toLowerCase();
+    if (!query) return editableParagraphs;
+    return editableParagraphs.filter((paragraph) =>
+      `${paragraph.text} ${paragraph.style} ${paragraph.list_type}`
+        .toLowerCase()
+        .includes(query)
+    );
+  }, [editableParagraphs, editorSearch]);
+
+  const allVisibleParagraphsSelected =
+    filteredEditableParagraphs.length > 0 &&
+    filteredEditableParagraphs.every((paragraph) =>
+      selectedParagraphs.includes(paragraph.index)
+    );
+
+  function toggleAllVisibleParagraphs() {
+    const visible = filteredEditableParagraphs.map((paragraph) => paragraph.index);
+    if (allVisibleParagraphsSelected) {
+      setSelectedParagraphs((current) =>
+        current.filter((index) => !visible.includes(index))
+      );
+      return;
+    }
+
+    setSelectedParagraphs((current) =>
+      Array.from(new Set([...current, ...visible]))
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="panel-stack">
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">SLC Document Workflow</span>
+          <h2>Document Formatter</h2>
+          <p>
+            Format your document, preview and make simple formatting edits,
+            then convert it to PDF without moving between separate tabs.
+          </p>
+        </div>
+
+        <div className="hero-badge">DOCX / PDF</div>
+      </section>
+
+      <div className="two-column">
+        <section className="card">
+          <div className="section-heading">
+            <span>01</span>
+
+            <div>
+              <h3>Document details</h3>
+              <p>Used on the formatted cover page.</p>
+            </div>
+          </div>
+
+          <label className="input-label">
+            Awarding Body
+            <input
+              value={awardingBody}
+              onChange={(event) => setAwardingBody(event.target.value)}
+            />
+          </label>
+
+          <label className="input-label">
+            Course Name / Centre Text
+            <input
+              value={courseName}
+              onChange={(event) => setCourseName(event.target.value)}
+            />
+          </label>
+
+          <label className="input-label">
+            Chapter / Unit Title
+            <input
+              value={chapter}
+              disabled={batchMode}
+              placeholder={
+                batchMode
+                  ? "Taken from each DOCX filename in ZIP mode"
+                  : undefined
+              }
+              onChange={(event) => setChapter(event.target.value)}
+            />
+
+            {batchMode && (
+              <small>
+                Each formatted document uses its own filename as the cover
+                chapter / unit title.
+              </small>
+            )}
+          </label>
+        </section>
+
+        <section className="card">
+          <div className="section-heading">
+            <span>02</span>
+
+            <div>
+              <h3>Source document</h3>
+              <p>
+                Drag and drop one DOCX or a ZIP containing multiple DOCX files,
+                plus an optional cover image.
+              </p>
+            </div>
+          </div>
+
+          <FileField
+            label="Source DOCX / ZIP"
+            accept=".docx,.zip"
+            onChange={(files) => {
+              const next = files[0] || null;
+              setDocument(next);
+              setJob(null);
+              resetPostFormatWorkflow();
+
+              if (next?.name.toLowerCase().endsWith(".zip")) {
+                setImages([]);
+              }
+            }}
+            help={document?.name || "Choose a .docx file or .zip containing Word (.docx) chapters"}
+          />
+
+          <FileField
+            label="Cover image (optional)"
+            accept=".jpg,.jpeg,.png"
+            onChange={(files) => setCover(files[0] || null)}
+            help={cover?.name || "JPG or PNG"}
+          />
+        </section>
+      </div>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>03</span>
+
+          <div>
+            <h3>Images</h3>
+            <p>
+              Linked images are downloaded first; uploaded images take priority
+              for the same number.
+            </p>
+          </div>
+        </div>
+
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={autoLinks}
+            onChange={(event) => setAutoLinks(event.target.checked)}
+          />
+
+          <span>
+            <strong>Automatically retrieve linked images</strong>
+            <small>
+              Supports direct image URLs and configured Magnific / Freepik
+              resource links.
+            </small>
+          </span>
+        </label>
+
+        {!batchMode ? (
+          <>
+            <FileField
+              label="Manual images / image ZIP (optional)"
+              accept=".jpg,.jpeg,.png,.webp,.zip"
+              multiple
+              onChange={setImages}
+              help={
+                images.length
+                  ? `${images.length} file(s) selected`
+                  : "Drag images or ZIP here as a fallback or override"
+              }
+            />
+
+            {images.length > 0 && (
+              <div className="file-list">
+                {images.map((file) => (
+                  <span key={`${file.name}-${file.size}`}>{file.name}</span>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <small>
+            ZIP batch mode retrieves linked images separately for each DOCX.
+            Manual image overrides remain available in single-DOCX mode.
+          </small>
+        )}
+      </section>
+
+      {error && <div className="error-box">{error}</div>}
+
+      <button
+        className="button primary large"
+        disabled={!document || busy}
+        type="submit"
+      >
+        {busy
+          ? batchMode
+            ? "Formatting batch…"
+            : "Formatting…"
+          : batchMode
+          ? "Format ZIP batch"
+          : "Format document"}
+      </button>
+
+      {job && (
+        <>
+          <JobResult
+            job={job}
+            title={
+              batchMode
+                ? "Formatted ZIP batch ready"
+                : "Formatted document ready"
+            }
+            downloadLabel={
+              batchMode ? "Download formatted ZIP" : "Download formatted DOCX"
+            }
+          />
+
+          {batchMode ? (
+            <div className="metrics">
+              <div>
+                <span>Detected</span>
+                <strong>{batchDetails?.documents_detected ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>Formatted</span>
+                <strong>{batchDetails?.formatted ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>Skipped</span>
+                <strong>{batchDetails?.skipped ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>Failed</span>
+                <strong>{batchDetails?.failed ?? 0}</strong>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="metrics">
+                <div>
+                  <span>Placeholders</span>
+                  <strong>{imageDetails?.placeholders ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Inserted</span>
+                  <strong>{imageDetails?.inserted ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Missing</span>
+                  <strong>{imageDetails?.missing?.length ?? 0}</strong>
+                </div>
+
+                <div>
+                  <span>Linked downloads</span>
+                  <strong>{linked?.downloaded ?? 0}</strong>
+                </div>
+              </div>
+
+              <section className="card workflow-card">
+                <div className="section-heading">
+                  <span>04</span>
+
+                  <div>
+                    <h3>Preview, edit and export</h3>
+                    <p>
+                      Review the formatted document, make simple formatting
+                      adjustments if needed, then convert the same file to PDF.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="workflow-actions">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={previewBusy || pdfBusy || editApplyBusy}
+                    onClick={previewFormattedDocument}
+                  >
+                    {previewBusy ? "Generating preview…" : "Preview"}
+                  </button>
+
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={previewBusy || pdfBusy || editApplyBusy}
+                    onClick={toggleSimpleEditor}
+                  >
+                    {editorOpen ? "Close editor" : "Edit formatting"}
+                  </button>
+
+                  <button
+                    className={`button secondary history-btn ${historyOpen ? "active" : ""}`}
+                    type="button"
+                    disabled={pdfBusy || previewBusy || editApplyBusy}
+                    onClick={() => {
+                      if (!historyOpen && history.length === 0 && job) loadHistory(job.id);
+                      setHistoryOpen((v) => !v);
+                    }}
+                    title="View edit history and revert"
+                  >
+                    {historyBusy ? "Loading…" : `History${history.length > 0 ? ` (${history.length})` : ""}`}
+                  </button>
+
+                  <button
+                    className="button primary"
+                    type="button"
+                    disabled={pdfBusy || previewBusy || editApplyBusy}
+                    onClick={convertFormattedDocumentToPdf}
+                  >
+                    {pdfBusy ? "Converting to PDF…" : "Convert to PDF"}
+                  </button>
+                </div>
+
+                {historyOpen && (
+                  <div className="history-panel">
+                    <div className="history-panel-header">
+                      <div>
+                        <h5>Edit History</h5>
+                        <p>Click any entry to revert the document to that state. Reverts are non-destructive — you can always come back.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="history-close"
+                        onClick={() => setHistoryOpen(false)}
+                        aria-label="Close history"
+                      >✕</button>
+                    </div>
+
+                    {history.length === 0 && !historyBusy && (
+                      <div className="history-empty">No edit history yet. Make an edit to see it here.</div>
+                    )}
+
+                    {historyBusy && (
+                      <div className="history-empty">Loading history…</div>
+                    )}
+
+                    <ol className="history-list">
+                      {history.map((entry, idx) => (
+                        <li
+                          key={entry.job_id}
+                          className={`history-entry ${entry.is_current ? "current" : ""}`}
+                        >
+                          <div className="history-entry-meta">
+                            <span className="history-label">
+                              {idx === history.length - 1 ? "🏁 " : entry.is_current ? "● " : "○ "}
+                              {entry.label}
+                            </span>
+                            {entry.completed_at && (
+                              <time className="history-time" dateTime={entry.completed_at}>
+                                {new Date(entry.completed_at).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </time>
+                            )}
+                          </div>
+
+                          <div className="history-entry-actions">
+                            {entry.is_current ? (
+                              <span className="history-current-badge">Current</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="button secondary small"
+                                onClick={() => revertToJob(entry)}
+                                disabled={editApplyBusy || previewBusy}
+                              >
+                                Revert to this
+                              </button>
+                            )}
+                            {entry.download_url && (
+                              <a
+                                className="button secondary small"
+                                href={apiUrl(entry.download_url)}
+                                title={`Download ${entry.filename ?? "file"}`}
+                              >
+                                ↓
+                              </a>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {editorOpen && (
+                  <section className="simple-editor">
+                    <div className="simple-editor-heading">
+                      <div>
+                        <h4>Document editor</h4>
+                        <p>
+                          Edit paragraph text, add new lines, apply Heading 1, change
+                          lists and page flow, update the footer, or refresh the Table of
+                          Contents. The preview refreshes after each saved edit.
+                        </p>
+                      </div>
+
+                      <span className="selection-count">
+                        {selectedParagraphs.length} selected
+                      </span>
+                    </div>
+
+                    <div className="editor-tool-section">
+                      <span className="editor-tool-label">Paragraph tools</span>
+
+                      <div className="editor-toolbar">
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length !== 1}
+                          onClick={openTextEditor}
+                        >
+                          Edit text / next line
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("heading1")}
+                        >
+                          Heading 1
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("bullets")}
+                        >
+                          • Bullets
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("numbering")}
+                        >
+                          1. Numbering
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("normal")}
+                        >
+                          Normal text
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("blank_line_before")}
+                        >
+                          Add line above
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("blank_line_after")}
+                        >
+                          Add line below
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("page_break_before")}
+                        >
+                          Move to next page
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("remove_page_break_before")}
+                        >
+                          Normal page flow
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("keep_together")}
+                        >
+                          Keep paragraph together
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || selectedParagraphs.length === 0}
+                          onClick={() => applySimpleEdit("allow_split")}
+                        >
+                          Allow page split
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="editor-tool-section">
+                      <span className="editor-tool-label">Document tools</span>
+
+                      <div className="editor-toolbar">
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy || footerBusy}
+                          onClick={toggleFooterEditor}
+                        >
+                          {footerBusy
+                            ? "Loading footer…"
+                            : footerEditorOpen
+                            ? "Close footer editor"
+                            : "Edit footer"}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy}
+                          onClick={updateTableOfContents}
+                        >
+                          Update TOC
+                        </button>
+
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={editApplyBusy}
+                          title={
+                            selectedParagraphs.length > 0
+                              ? "Convert selected paragraphs to reference bullets"
+                              : "Auto-detect references section and convert to bullets"
+                          }
+                          onClick={() => applySimpleEdit("references_bullets")}
+                        >
+                          References → Bullets
+                        </button>
+
+                        <button
+                          type="button"
+                          className={`button small ${spacingEditorOpen ? "primary" : "secondary"}`}
+                          disabled={editApplyBusy || spacingBusy}
+                          onClick={() => {
+                            setSpacingEditorOpen((v) => !v);
+                            if (!spacingChecked && !spacingEditorOpen) checkPageSpacing();
+                          }}
+                        >
+                          {spacingBusy ? "Checking…" : spacingEditorOpen ? "Close spacing tool" : "Clean Page Spacing"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {textEditorOpen && (
+                      <div className="editor-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Edit paragraph text</h5>
+                            <p>
+                              Change the wording directly. Press Enter anywhere
+                              in the box to place text on the next line in Word.
+                            </p>
+                          </div>
+                        </div>
+
+                        <textarea
+                          className="editor-textarea"
+                          value={textDraft}
+                          onChange={(event) => setTextDraft(event.target.value)}
+                          rows={7}
+                          autoFocus
+                        />
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={editApplyBusy}
+                            onClick={saveTextEdit}
+                          >
+                            {editApplyBusy ? "Saving…" : "Save text"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={editApplyBusy}
+                            onClick={() => setTextEditorOpen(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {footerEditorOpen && (
+                      <div className="editor-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Edit footer</h5>
+                            <p>
+                              Update footer text and make small left/right
+                              position adjustments without changing the SLC style.
+                            </p>
+                          </div>
+
+                          <span className="selection-count">
+                            {footerSettings.footer_parts} footer part(s)
+                          </span>
+                        </div>
+
+                        <div className="footer-editor-grid">
+                          <label className="input-label">
+                            Course / centre footer text
+                            <input
+                              value={footerSettings.course_text}
+                              onChange={(event) =>
+                                setFooterSettings((current) => ({
+                                  ...current,
+                                  course_text: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+
+                          <label className="input-label">
+                            Copyright text
+                            <input
+                              value={footerSettings.copyright_text}
+                              onChange={(event) =>
+                                setFooterSettings((current) => ({
+                                  ...current,
+                                  copyright_text: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+
+                          <label className="input-label">
+                            Page number format
+                            <input value="1 | Page" readOnly aria-readonly="true" />
+                            <span className="input-hint">
+                              Fixed format. Page numbers update automatically: 1 | Page, 2 | Page, 3 | Page…
+                            </span>
+                          </label>
+                        </div>
+
+                        <div className="footer-position-section">
+                          <div className="footer-position-heading">
+                            <div>
+                              <strong>Footer spacing / position</strong>
+                              <span>
+                                Nudge an item left or right if it does not look visually centred.
+                                The footer style itself stays unchanged.
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="button secondary small"
+                              disabled={editApplyBusy}
+                              onClick={resetFooterOffsets}
+                            >
+                              Reset positions
+                            </button>
+                          </div>
+
+                          <div className="footer-position-grid">
+                            {[
+                              ["Page number", "page_offset"],
+                              ["Course name", "course_offset"],
+                              ["Copyright", "copyright_offset"],
+                            ].map(([label, field]) => {
+                              const offsetField = field as
+                                | "page_offset"
+                                | "course_offset"
+                                | "copyright_offset";
+                              const value = footerSettings[offsetField];
+                              return (
+                                <div className="footer-position-control" key={offsetField}>
+                                  <span className="footer-position-label">{label}</span>
+                                  <div className="footer-position-stepper">
+                                    <button
+                                      type="button"
+                                      className="position-button"
+                                      aria-label={`Move ${label.toLowerCase()} left`}
+                                      disabled={editApplyBusy || value <= -6}
+                                      onClick={() => adjustFooterOffset(offsetField, -1)}
+                                    >
+                                      − Left
+                                    </button>
+                                    <output aria-live="polite">
+                                      {footerOffsetLabel(value)}
+                                    </output>
+                                    <button
+                                      type="button"
+                                      className="position-button"
+                                      aria-label={`Move ${label.toLowerCase()} right`}
+                                      disabled={editApplyBusy || value >= 6}
+                                      onClick={() => adjustFooterOffset(offsetField, 1)}
+                                    >
+                                      Right +
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          <p className="footer-position-hint">
+                            Each click adds or removes a small amount of horizontal space. Save the footer
+                            to refresh the preview, or use Reset positions to restore the original alignment.
+                          </p>
+                        </div>
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={editApplyBusy}
+                            onClick={saveFooterEdit}
+                          >
+                            {editApplyBusy ? "Saving…" : "Save footer"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={editApplyBusy}
+                            onClick={() => setFooterEditorOpen(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {spacingEditorOpen && (
+                      <div className="editor-subpanel spacing-subpanel">
+                        <div className="editor-subpanel-heading">
+                          <div>
+                            <h5>Clean Page Spacing</h5>
+                            <p>
+                              Detect and fix spacing problems that break page layout. Run the
+                              check first, then apply selected fixes.
+                            </p>
+                          </div>
+                          {spacingChecked && (
+                            <span className={`selection-count ${spacingIssues.length === 0 ? "clean" : "warn"}`}>
+                              {spacingIssues.length === 0 ? "✓ No issues" : `${spacingIssues.length} issue${spacingIssues.length === 1 ? "" : "s"}`}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="spacing-checks">
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.remove_extra_blanks}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, remove_extra_blanks: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Remove extra blank paragraphs</strong>
+                              <small>Keep at most one blank line between blocks</small>
+                            </span>
+                          </label>
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.remove_multi_breaks}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, remove_multi_breaks: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Remove duplicate page breaks</strong>
+                              <small>Prevent blank pages caused by stacked page-break paragraphs</small>
+                            </span>
+                          </label>
+                          <label className="toggle-row compact">
+                            <input
+                              type="checkbox"
+                              checked={spacingFixOpts.fix_orphan_headings}
+                              onChange={(e) => setSpacingFixOpts((o) => ({ ...o, fix_orphan_headings: e.target.checked }))}
+                            />
+                            <span>
+                              <strong>Fix orphaned headings</strong>
+                              <small>Keep headings attached to their first paragraph</small>
+                            </span>
+                          </label>
+                        </div>
+
+                        {spacingChecked && spacingIssues.length > 0 && (
+                          <div className="spacing-issues-list">
+                            {spacingIssues.map((issue, idx) => (
+                              <div key={idx} className={`spacing-issue spacing-issue-${issue.kind}`}>
+                                <span className="spacing-issue-badge">
+                                  {issue.kind === "extra_blank" && "Extra blank"}
+                                  {issue.kind === "multi_break" && "Multi-break"}
+                                  {issue.kind === "blank_page" && "Blank page"}
+                                  {issue.kind === "orphan_heading" && "Orphan heading"}
+                                  {issue.kind === "split_paragraph" && "Split paragraph"}
+                                </span>
+                                <span className="spacing-issue-desc">{issue.description}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {spacingChecked && spacingIssues.length === 0 && (
+                          <div className="spacing-clean-msg">
+                            ✓ No spacing issues detected. The document looks good.
+                          </div>
+                        )}
+
+                        <div className="editor-subpanel-actions">
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={spacingBusy}
+                            onClick={checkPageSpacing}
+                          >
+                            {spacingBusy ? "Checking…" : "Re-check"}
+                          </button>
+                          <button
+                            type="button"
+                            className="button primary small"
+                            disabled={spacingBusy || (!spacingFixOpts.remove_extra_blanks && !spacingFixOpts.remove_multi_breaks && !spacingFixOpts.fix_orphan_headings)}
+                            onClick={applySpacingClean}
+                          >
+                            {spacingBusy ? "Applying…" : "Apply fixes"}
+                          </button>
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            onClick={() => setSpacingEditorOpen(false)}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="editor-filter-row">
+                      <input
+                        value={editorSearch}
+                        onChange={(event) => setEditorSearch(event.target.value)}
+                        placeholder="Find a paragraph or heading…"
+                        aria-label="Find a paragraph or heading"
+                      />
+
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={filteredEditableParagraphs.length === 0}
+                        onClick={toggleAllVisibleParagraphs}
+                      >
+                        {allVisibleParagraphsSelected
+                          ? "Clear shown"
+                          : "Select shown"}
+                      </button>
+                    </div>
+
+                    {editMessage && (
+                      <div className="success-box compact-success">
+                        {editMessage}
+                      </div>
+                    )}
+
+                    {editorBusy ? (
+                      <div className="editor-loading">Loading paragraphs…</div>
+                    ) : (
+                      <div className="editable-paragraph-list">
+                        {filteredEditableParagraphs.map((paragraph) => {
+                          const selected = selectedParagraphs.includes(
+                            paragraph.index
+                          );
+
+                          return (
+                            <label
+                              className={`editable-paragraph ${
+                                selected ? "selected" : ""
+                              }`}
+                              key={paragraph.index}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() =>
+                                  toggleParagraphSelection(paragraph.index)
+                                }
+                              />
+
+                              <span className="editable-paragraph-content">
+                                <span className="paragraph-badges">
+                                  <span>{paragraph.style}</span>
+                                  {paragraph.list_type !== "none" && (
+                                    <span>{
+                                      paragraph.list_type === "bullet"
+                                        ? "Bullets"
+                                        : "Numbered"
+                                    }</span>
+                                  )}
+                                  {paragraph.page_break_before && (
+                                    <span>Starts new page</span>
+                                  )}
+                                  {paragraph.keep_together && (
+                                    <span>Keeps together</span>
+                                  )}
+                                </span>
+
+                                <span className="paragraph-text">
+                                  {paragraph.text}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+
+                        {filteredEditableParagraphs.length === 0 && (
+                          <div className="editor-empty">
+                            No matching editable paragraphs were found.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </section>
+                )}
+
+                {previewUrl && (
+                  <div className="preview-shell">
+                    <iframe
+                      className="document-preview"
+                      src={previewUrl}
+                      title="Formatted document preview"
+                    />
+                  </div>
+                )}
+
+                {pdfJob && (
+                  <div className="pdf-result-stack">
+                    <JobResult
+                      job={pdfJob}
+                      title="PDF ready"
+                      downloadLabel="Download PDF"
+                    />
+
+                    {pdfJob.details?.second_blank_pages_removed > 0 && (
+                      <div className="success-box">
+                        The unwanted blank second page was removed automatically.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+
+          {!batchMode && linked?.entries?.length > 0 && (
+            <section className="card compact-card">
+              <h3>Linked image results</h3>
+
+              <div className="link-results">
+                {linked.entries.map((entry: any) => (
+                  <div key={`${entry.number}-${entry.url}`}>
+                    <strong>Image {entry.number}</strong>
+
+                    <span className={`status ${entry.status}`}>
+                      {entry.status.replace("_", " ")}
+                    </span>
+
+                    <small>{entry.message || entry.source_type}</small>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </>
+      )}
+    </form>
+  );
+}
+
+/* -------------------------------------------------------
+   WORD TO PDF
+------------------------------------------------------- */
+
+/* -------------------------------------------------------
+   IMAGE FINDER, SEARCH GUIDES AND COURSE COVERS
+------------------------------------------------------- */
+
+function CourseImagesPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [courseName, setCourseName] = useState("");
+  const [mode, setMode] = useState<"guides" | "insert">("insert");
+  const [imageSource, setImageSource] = useState<"auto" | "freepik" | "pexels" | "generate">("auto");
+  const [generateMissing, setGenerateMissing] = useState(false);
+  const [useOpenrouter, setUseOpenrouter] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  // Render these as visible radio cards rather than a browser-native <select>.
+  // Native dark-mode option menus appear grey or unreadable on some browsers.
+  const imageSources = [
+    { value: "auto", label: "Pexels, then Freepik", info: "Search both stock-photo libraries" },
+    { value: "freepik", label: "Freepik only", info: "Search Freepik stock photographs" },
+    { value: "pexels", label: "Pexels only", info: "Search Pexels stock photographs" },
+  ] as const;
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!file || busy) return;
+    setBusy(true);
+    setError("");
+    setJob(null);
+    try {
+      const form = new FormData();
+      form.append("document", file);
+      form.append("course_name", courseName);
+      form.append("mode", mode);
+      form.append("image_source", imageSource);
+      form.append("generate_missing", "false");
+      form.append("use_openrouter", String(useOpenrouter));
+      if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
+      const result = await apiRequest("/api/v1/course-images/prepare", {
+        method: "POST",
+        body: form,
+      });
+      setJob(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Image preparation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const details = job?.details;
+  const isSingleDocx = file?.name.toLowerCase().endsWith(".docx") ?? false;
+  const isWordOutput = job?.output_filename?.toLowerCase().endsWith(".docx") ?? false;
+  return (
+    <form className="panel-stack" onSubmit={submit}>
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">SLC Course Image Workflow</span>
+          <h2>Find &amp; Add Images</h2>
+          <p>Add suitable photographs beneath chapter headings and download the finished Word document.</p>
+        </div>
+        <div className="hero-badge">IMG</div>
+      </section>
+
+      <div className="two-column">
+        <section className="card">
+          <div className="section-heading">
+            <span>01</span>
+            <div>
+              <h3>Upload documents</h3>
+              <p>Upload one Word document or a ZIP containing multiple Word chapters. ZIP uploads are processed in a batch and returned as a ZIP.</p>
+            </div>
+          </div>
+          <FileField
+            label="Course DOCX / ZIP"
+            accept=".docx,.zip"
+            onChange={(files) => { setFile(files[0] || null); setJob(null); }}
+            help={file?.name || "Choose a .docx file or .zip containing Word (.docx) chapters"}
+          />
+          <label className="input-label">
+            Course / Module Title
+            <input
+              value={courseName}
+              placeholder="Optional – otherwise use uploaded file names"
+              onChange={(event) => setCourseName(event.target.value)}
+            />
+          </label>
+          {mode === "guides" && (
+            <FileField
+              label="Existing cover image (optional)"
+              accept=".png,.jpg,.jpeg,.webp"
+              onChange={(files) => { setCoverFile(files[0] || null); setJob(null); }}
+              help={coverFile?.name || "Colour-correct or reuse a supplied cover photo"}
+            />
+          )}
+        </section>
+
+        <section className="card">
+          <div className="section-heading">
+            <span>02</span>
+            <div>
+              <h3>Choose image settings</h3>
+              <p>Choose a stock photo source. AI image generation is disabled.</p>
+            </div>
+          </div>
+          <label className="toggle-row">
+            <input
+              type="radio" name="image-mode" value="insert"
+              checked={mode === "insert"}
+              onChange={() => { setMode("insert"); setJob(null); }}
+            />
+            <span>
+              <strong>Add images to my Word document</strong>
+              <small>Download a finished Word file, or a ZIP of edited Word files for a batch upload.</small>
+            </span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="radio" name="image-mode" value="guides"
+              checked={mode === "guides"}
+              onChange={() => { setMode("guides"); setJob(null); }}
+            />
+            <span>
+              <strong>Image guides &amp; covers (optional)</strong>
+              <small>Create a separate guide without editing the original document.</small>
+            </span>
+          </label>
+          <fieldset className="image-source-fieldset">
+            <legend>Image source</legend>
+            <div className="image-source-options">
+              {imageSources.map((source) => (
+                <label
+                  className={`image-source-option ${imageSource === source.value ? "selected" : ""}`}
+                  key={source.value}
+                >
+                  <input
+                    type="radio"
+                    name="image-source"
+                    value={source.value}
+                    checked={imageSource === source.value}
+                    onChange={() => { setImageSource(source.value); setJob(null); }}
+                  />
+                  <span>
+                    <strong>{source.label}</strong>
+                    <small>{source.info}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <label className="toggle-row">
+            <input
+              type="checkbox" checked={useOpenrouter}
+              onChange={(event) => { setUseOpenrouter(event.target.checked); setJob(null); }}
+            />
+            <span>
+              <strong>Use OpenRouter to improve image search ideas</strong>
+              <small>Optional AI analysis of chapter headings and short passages for more specific searches and photo descriptions. Needs OPENROUTER_API_KEY on the backend.</small>
+            </span>
+          </label>
+        </section>
+      </div>
+
+      {error && <div className="error-box" role="alert">{error}</div>}
+      <button type="submit" className="button primary large" disabled={!file || busy}>
+        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : file?.name.toLowerCase().endsWith(".zip") ? "Add images to ZIP chapters" : "Add images to Word"}
+      </button>
+      {job && (
+        <>
+          <JobResult
+            job={job}
+            title={mode === "guides" ? "Image guides ready" : "Your document is ready"}
+            downloadLabel={mode === "guides" ? "Download guides ZIP" : isWordOutput ? "Download Word document" : "Download edited Word files ZIP"}
+          />
+          <p className="image-completion-note">
+            {mode === "insert"
+              ? `${details?.photos_inserted ?? 0} image(s) added to ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP above."}`
+              : `${details?.guides_created ?? 0} guide(s) created.`}
+          </p>
+          {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
+            <details className="image-result-warnings">
+              <summary>Show {details.warnings.length} processing notice(s)</summary>
+              <ul>{details.warnings.map((message: string, i: number) => <li key={i}>{message}</li>)}</ul>
+            </details>
+          )}
+        </>
+      )}
+    </form>
+  );
+}
+
+function WordPdfPanel() {
+  const [files, setFiles] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+
+    if (!files.length) return;
+
+    setBusy(true);
+    setError("");
+    setJob(null);
+
+    try {
+      const form = new FormData();
+
+      files.forEach((file) => {
+        form.append("files", file);
+      });
+
+      const result = await apiRequest(
+        "/api/v1/word-to-pdf",
+        {
+          method: "POST",
+          body: form,
+        }
+      );
+
+      setJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Conversion failed."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="panel-stack"
+    >
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">
+            SLC Conversion Workflow
+          </span>
+
+          <h2>Word → PDF</h2>
+
+          <p>
+            Convert assignment briefs,
+            written-assignment templates, or an entire ZIP
+            without running the formatter.
+          </p>
+        </div>
+
+        <div className="hero-badge">PDF</div>
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>01</span>
+
+          <div>
+            <h3>Upload Word files</h3>
+
+            <p>
+              Drag multiple DOCX files or ZIP packages into
+              the area below.
+            </p>
+          </div>
+        </div>
+
+        <FileField
+          label="DOCX / ZIP"
+          accept=".docx,.zip"
+          multiple
+          onChange={setFiles}
+          help={
+            files.length
+              ? `${files.length} file(s) selected`
+              : "DOCX and ZIP files supported"
+          }
+        />
+
+        {files.length > 0 && (
+          <div className="file-list">
+            {files.map((file) => (
+              <span key={`${file.name}-${file.size}`}>
+                {file.name}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {error && (
+        <div className="error-box">{error}</div>
+      )}
+
+      <button
+        className="button primary large"
+        disabled={!files.length || busy}
+        type="submit"
+      >
+        {busy ? "Converting…" : "Convert to PDF"}
+      </button>
+
+      {job && (
+        <>
+          <JobResult
+            job={job}
+            title={`${
+              job.details?.converted_documents || 1
+            } PDF file(s) ready`}
+          />
+
+          {job.details?.garamond_exact && (
+            <section className="card compact-card">
+              <h3>PDF font rendering</h3>
+              <p>
+                PDF font: <strong>Garamond</strong>. Exact Garamond is installed on the server; font substitution is disabled.
+              </p>
+            </section>
+          )}
+        </>
+      )}
+    </form>
+  );
+}
+
+/* -------------------------------------------------------
+   PDF EDITOR
+------------------------------------------------------- */
+
+function PdfEditorPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [pageCount, setPageCount] = useState(0);
+
+  const [selected, setSelected] = useState<Set<number>>(
+    new Set()
+  );
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  const remaining = useMemo(
+    () => Math.max(0, pageCount - selected.size),
+    [pageCount, selected]
+  );
+
+  async function choosePdf(files: File[]) {
+    const next = files[0] || null;
+
+    setFile(next);
+    setPageCount(0);
+    setSelected(new Set());
+    setJob(null);
+    setError("");
+
+    if (!next) return;
+
+    try {
+      const form = new FormData();
+
+      form.append("file", next);
+
+      const data = await apiRequest(
+        "/api/v1/pdf/page-count",
+        {
+          method: "POST",
+          body: form,
+        }
+      );
+
+      setPageCount(data.pages);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The PDF could not be read."
+      );
+    }
+  }
+
+  function togglePage(page: number) {
+    setSelected((current) => {
+      const next = new Set(current);
+
+      if (next.has(page)) {
+        next.delete(page);
+      } else {
+        next.add(page);
+      }
+
+      return next;
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+
+    if (!file || !selected.size) return;
+
+    setBusy(true);
+    setError("");
+    setJob(null);
+
+    try {
+      const form = new FormData();
+
+      form.append("file", file);
+
+      form.append(
+        "pages",
+        Array.from(selected)
+          .sort((a, b) => a - b)
+          .join(",")
+      );
+
+      const result = await apiRequest(
+        "/api/v1/pdf/remove-pages",
+        {
+          method: "POST",
+          body: form,
+        }
+      );
+
+      setJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "PDF editing failed."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="panel-stack"
+    >
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">
+            SLC PDF Workflow
+          </span>
+
+          <h2>PDF Page Editor</h2>
+
+          <p>
+            Remove selected pages from a PDF and download a
+            clean revised copy.
+          </p>
+        </div>
+
+        <div className="hero-badge">EDIT</div>
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>01</span>
+
+          <div>
+            <h3>Choose PDF</h3>
+
+            <p>
+              Drag and drop a PDF below. The original file is
+              never changed.
+            </p>
+          </div>
+        </div>
+
+        <FileField
+          label="PDF file"
+          accept=".pdf"
+          onChange={choosePdf}
+          help={
+            file?.name ||
+            "PDF only"
+          }
+        />
+      </section>
+
+      {pageCount > 0 && (
+        <section className="card">
+          <div className="summary-row">
+            <div>
+              <span>Total pages</span>
+              <strong>{pageCount}</strong>
+            </div>
+
+            <div>
+              <span>Selected</span>
+              <strong>{selected.size}</strong>
+            </div>
+
+            <div>
+              <span>Remaining</span>
+              <strong>{remaining}</strong>
+            </div>
+          </div>
+
+          <h3>Select pages to remove</h3>
+
+          <div className="page-grid">
+            {Array.from(
+              { length: pageCount },
+              (_, index) => index + 1
+            ).map((page) => (
+              <button
+                type="button"
+                onClick={() => togglePage(page)}
+                className={
+                  selected.has(page)
+                    ? "page-chip selected"
+                    : "page-chip"
+                }
+                key={page}
+              >
+                {page}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {error && (
+        <div className="error-box">{error}</div>
+      )}
+
+      <button
+        className="button primary large"
+        disabled={
+          !file ||
+          !selected.size ||
+          selected.size >= pageCount ||
+          busy
+        }
+        type="submit"
+      >
+        {busy
+          ? "Updating PDF…"
+          : "Remove selected pages"}
+      </button>
+
+      {job && (
+        <JobResult
+          job={job}
+          title="Updated PDF ready"
+        />
+      )}
+    </form>
+  );
+}
+
+/* -------------------------------------------------------
+   PDF COVER REPLACEMENT
+------------------------------------------------------- */
+
+function PdfCoverPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [cover, setCover] = useState<File | null>(null);
+  const [awardingBody, setAwardingBody] = useState("");
+  const [courseName, setCourseName] = useState("");
+  const [unitName, setUnitName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [job, setJob] = useState<JobResponse | null>(null);
+
+  const ready =
+    Boolean(file) &&
+    Boolean(cover) &&
+    Boolean(awardingBody.trim()) &&
+    Boolean(courseName.trim()) &&
+    Boolean(unitName.trim());
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!file || !cover || !ready) return;
+
+    setBusy(true);
+    setError("");
+    setJob(null);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("cover", cover);
+      form.append("awarding_body", awardingBody.trim());
+      form.append("course_name", courseName.trim());
+      form.append("unit_name", unitName.trim());
+
+      const result = await apiRequest("/api/v1/pdf/replace-cover", {
+        method: "POST",
+        body: form,
+      });
+
+      setJob(result);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "PDF cover replacement failed."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="panel-stack">
+      <section className="hero compact">
+        <div>
+          <span className="eyebrow">SLC PDF Workflow</span>
+          <h2>Replace PDF Cover</h2>
+          <p>
+            Replace page 1 with a new cover image and add three text rows
+            inside the lower teal/green cover band, matching the SLC cover
+            style. All three use the same medium text size. Pages 2 onward are
+            kept unchanged.
+          </p>
+        </div>
+
+        <div className="hero-badge">COVER</div>
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>01</span>
+          <div>
+            <h3>Choose source PDF</h3>
+            <p>The uploaded original is never overwritten.</p>
+          </div>
+        </div>
+
+        <FileField
+          label="Source PDF"
+          accept=".pdf"
+          onChange={(files) => {
+            setFile(files[0] || null);
+            setJob(null);
+            setError("");
+          }}
+          help={file?.name || "PDF only"}
+        />
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>02</span>
+          <div>
+            <h3>Choose new cover image</h3>
+            <p>
+              Upload the replacement cover. It is fitted to the original first
+              page size. JPG, PNG, WebP and single-page PDF covers are supported.
+            </p>
+          </div>
+        </div>
+
+        <FileField
+          label="New cover image"
+          accept=".pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+          onChange={(files) => {
+            setCover(files[0] || null);
+            setJob(null);
+            setError("");
+          }}
+          help={cover?.name || "JPG, PNG, WebP or PDF"}
+        />
+      </section>
+
+      <section className="card">
+        <div className="section-heading">
+          <span>03</span>
+          <div>
+            <h3>Cover text</h3>
+            <p>
+              These are placed as three left-aligned rows inside the lower
+              teal/green cover band using one shared medium font size. If needed,
+              all three shrink together so the sizes stay equal.
+            </p>
+          </div>
+        </div>
+
+        <div className="cover-text-grid">
+          <label className="input-label">
+            Awarding Body Name
+            <input
+              value={awardingBody}
+              onChange={(event) => {
+                setAwardingBody(event.target.value);
+                setJob(null);
+                setError("");
+              }}
+              placeholder="e.g. Qualifi"
+              required
+            />
+          </label>
+
+          <label className="input-label">
+            Course Name
+            <input
+              value={courseName}
+              onChange={(event) => {
+                setCourseName(event.target.value);
+                setJob(null);
+                setError("");
+              }}
+              placeholder="e.g. Level 5 Diploma in Business Management"
+              required
+            />
+          </label>
+
+          <label className="input-label">
+            Unit Name
+            <input
+              value={unitName}
+              onChange={(event) => {
+                setUnitName(event.target.value);
+                setJob(null);
+                setError("");
+              }}
+              placeholder="e.g. Unit 3: Business Strategy"
+              required
+            />
+          </label>
+        </div>
+
+        <p className="cover-text-note">
+          Text style: left-aligned inside the teal/green band, Garamond where
+          available, white, same medium size for all three rows.
+        </p>
+      </section>
+
+      {error && <div className="error-box">{error}</div>}
+
+      <button
+        className="button primary large"
+        disabled={!ready || busy}
+        type="submit"
+      >
+        {busy ? "Updating cover…" : "Replace cover"}
+      </button>
+
+      {job && (
+        <>
+          <section className="card compact-card">
+            <div className="summary-row">
+              <div>
+                <span>Cover replaced</span>
+                <strong>{job.details?.cover_replaced ? "Yes" : "No"}</strong>
+              </div>
+              <div>
+                <span>Text size</span>
+                <strong>{job.details?.font_size ?? "—"} pt</strong>
+              </div>
+              <div>
+                <span>Pages</span>
+                <strong>{job.details?.pages ?? "—"}</strong>
+              </div>
+            </div>
+          </section>
+
+          <JobResult job={job} title="Updated PDF ready" />
+        </>
+      )}
+    </form>
+  );
+}
+
+/* -------------------------------------------------------
+   MAIN APP
+------------------------------------------------------- */
+
+export default function Home() {
+  const [tab, setTab] = useState<Tab>("formatter");
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">SLC</span>
+
+          <div>
+            <strong>Document Tools</strong>
+            <small>South London College</small>
+          </div>
+        </div>
+
+        <span className="environment">Vercel + Railway</span>
+      </header>
+
+      <div className="workspace">
+        <nav className="tabs" aria-label="Document tools">
+          <button
+            type="button"
+            className={tab === "formatter" ? "active" : ""}
+            onClick={() => setTab("formatter")}
+          >
+            Document Formatter
+          </button>
+
+          <button
+            type="button"
+            className={tab === "course-images" ? "active" : ""}
+            onClick={() => setTab("course-images")}
+          >
+            Find &amp; Add Images
+          </button>
+
+          <button
+            type="button"
+            className={tab === "word-pdf" ? "active" : ""}
+            onClick={() => setTab("word-pdf")}
+          >
+            Word → PDF
+          </button>
+
+          <button
+            type="button"
+            className={tab === "pdf-editor" ? "active" : ""}
+            onClick={() => setTab("pdf-editor")}
+          >
+            PDF Editor
+          </button>
+
+          <button
+            type="button"
+            className={tab === "pdf-replace" ? "active" : ""}
+            onClick={() => setTab("pdf-replace")}
+          >
+            Replace PDF Cover
+          </button>
+        </nav>
+
+        {tab === "formatter" && <FormatterPanel />}
+        {tab === "course-images" && <CourseImagesPanel />}
+        {tab === "word-pdf" && <WordPdfPanel />}
+        {tab === "pdf-editor" && <PdfEditorPanel />}
+        {tab === "pdf-replace" && <PdfCoverPanel />}
+      </div>
+    </main>
+  );
+}
