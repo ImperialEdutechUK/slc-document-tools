@@ -126,7 +126,7 @@ class FreepikImages:
     def search_photo(
         self, query: str, *, subject: str, portrait: bool,
         used: set[str], normalise: Callable[[bytes], bytes],
-        max_candidates: int = 6,
+        max_candidates: int = 1,
     ) -> tuple[bytes, str, str, str, str] | None:
         """Return JPG, item URL, photo ID, licence type and author; no previews."""
         with httpx.Client(timeout=25, follow_redirects=False) as client:
@@ -157,10 +157,9 @@ class FreepikImages:
                 item_id = str(item["id"])
                 # Licence-based resource download endpoint, not watermarked
                 # preview thumbnails returned by the catalogue endpoint.
-                for endpoint, params in (
-                    (f"/resources/{item_id}/download/jpg", None),
-                    (f"/resources/{item_id}/download", {"image_size": "large"}),
-                ):
+                # Do not try a second potentially chargeable download URL if
+                # the first attempt fails. One resource, one download attempt.
+                for endpoint, params in ((f"/resources/{item_id}/download/jpg", None),):
                     try:
                         downloaded = client.get(self.base + endpoint, headers=self.headers, params=params)
                         downloaded.raise_for_status()

@@ -1,4 +1,4 @@
-> **Current workflow (v24):** For the free-first sources, persistent library, preview-and-confirm steps, and no-AI-generation policy, read [FREE_FIRST_IMAGE_WORKFLOW.md](FREE_FIRST_IMAGE_WORKFLOW.md). Some API/generation descriptions below document the legacy workflow and are no longer active in Find & Add Images.
+> **ARCHIVED / LEGACY:** The API and Freepik AI-generation instructions below describe an older workflow and are NOT active in v26. For current settings, pricing safeguards and live endpoints, use [FREE_FIRST_IMAGE_WORKFLOW.md](FREE_FIRST_IMAGE_WORKFLOW.md) and [../RELEASE_V26.md](../RELEASE_V26.md).
 
 # Find & Add Images — new document workflow
 

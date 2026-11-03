@@ -42,18 +42,18 @@ from .formatter.simple_editing import (
     replace_paragraph_text,
 )
 from .models import Job
-from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest, ConfirmCourseImagePreviewRequest
+from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest, ConfirmCourseImagePreviewRequest, ReplaceCourseImagePreviewRequest
 from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, StorageNotFoundError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
 from .services.course_images import CourseImagesError, build_course_image_package
-from .services.course_image_review import make_image_preview, finish_image_preview, preview_jpeg
+from .services.course_image_review import make_image_preview, finish_image_preview, preview_jpeg, replace_with_free_image
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v25-name-independent-image-links"
+BUILD_VERSION = "2026.11.03-v26-free-first-image-repair"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -359,6 +359,7 @@ async def review_course_images(
     course_name: Annotated[str, Form()] = "",
     image_source: Annotated[str, Form()] = "mixed",
     reuse_existing: Annotated[bool, Form()] = True,
+    allow_freepik: Annotated[bool, Form()] = False,
     use_openrouter: Annotated[bool, Form()] = False,
     db: Session = Depends(get_db),
 ) -> JobResponse:
@@ -376,7 +377,7 @@ async def review_course_images(
         result = await run_in_threadpool(
             make_image_preview, raw, filename, course_name=course_name,
             image_source=image_source, reuse_existing=reuse_existing,
-            use_openrouter=use_openrouter,
+            use_openrouter=use_openrouter, allow_freepik=allow_freepik,
         )
         details = result.details
         details["build"] = BUILD_VERSION
@@ -416,6 +417,41 @@ def get_course_image_preview(job_id: str, image_id: int, db: Session = Depends(g
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post(f"{API_PREFIX}/course-images/reviews/{{job_id}}/replace", response_model=JobResponse)
+async def replace_course_image_preview(
+    job_id: str, request: ReplaceCourseImagePreviewRequest, db: Session = Depends(get_db),
+) -> JobResponse:
+    """Re-search one image using free photos, keeping the existing review job."""
+    preview = db.get(Job, job_id)
+    if not preview or preview.job_type != "course_images_preview" or preview.status != "completed" or not preview.output_key:
+        raise HTTPException(status_code=404, detail="Review not found. Start a new preview.")
+    try:
+        raw = storage.get_bytes(preview.output_key)
+        changed = await run_in_threadpool(replace_with_free_image, raw, request.image_id, request.search)
+        details = changed.details
+        details["build"] = BUILD_VERSION
+        revision = details.get("free_replacements_used", 0)
+        details["previews"] = [
+            {**item, "preview_url": f"{API_PREFIX}/course-images/reviews/{job_id}/images/{item['id']}?v={revision}"}
+            for item in details["previews"]
+        ]
+        storage.put_bytes(preview.output_key, changed.payload, "application/zip")
+        preview.meta_json = json.dumps(details, ensure_ascii=False)
+        db.add(preview)
+        db.commit()
+        db.refresh(preview)
+        result = _job_response(preview)
+        result.status = "review_ready"
+        result.output_filename = None
+        result.download_url = None
+        return result
+    except (CourseImagesError, StorageError) as exc:
+        raise HTTPException(status_code=422 if isinstance(exc, CourseImagesError) else 503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Replacing course image preview failed")
+        raise HTTPException(status_code=500, detail="Unable to replace this image. The existing preview was kept.") from exc
+
+
 @app.post(f"{API_PREFIX}/course-images/reviews/{{job_id}}/confirm", response_model=JobResponse)
 async def confirm_course_image_preview(
     job_id: str, request: ConfirmCourseImagePreviewRequest,
@@ -451,6 +487,7 @@ async def prepare_course_images(
     generate_missing: Annotated[bool, Form()] = False,
     image_source: Annotated[str, Form()] = "mixed",
     reuse_existing: Annotated[bool, Form()] = True,
+    allow_freepik: Annotated[bool, Form()] = False,
     use_openrouter: Annotated[bool, Form()] = False,
     cover_image: Annotated[UploadFile | None, File()] = None,
     db: Session = Depends(get_db),
@@ -481,6 +518,7 @@ async def prepare_course_images(
             cover_upload=cover_bytes,
             image_source=image_source,
             reuse_existing=reuse_existing,
+            allow_freepik=allow_freepik,
             use_openrouter=use_openrouter,
         )
         result.details["build"] = BUILD_VERSION

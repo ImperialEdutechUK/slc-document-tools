@@ -1934,15 +1934,18 @@ function CourseImagesPanel() {
   const [imageSource, setImageSource] = useState<"mixed" | "free" | "pexels" | "pixabay" | "openverse" | "freepik">("mixed");
   const [reuseExisting, setReuseExisting] = useState(true);
   const [previewImages, setPreviewImages] = useState(true);
+  const [allowFreepik, setAllowFreepik] = useState(false);
   const [useOpenrouter, setUseOpenrouter] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
   const [reviewJob, setReviewJob] = useState<JobResponse | null>(null);
   const [selectedImages, setSelectedImages] = useState<number[]>([]);
+  const [replacementQueries, setReplacementQueries] = useState<Record<number, string>>({});
+  const [replacingImage, setReplacingImage] = useState<number | null>(null);
 
   const imageSources = [
-    { value: "mixed", label: "Free first, Freepik fallback", info: "Saved images → Pexels → Pixabay → Openverse → licensed Freepik stock if needed" },
+    { value: "mixed", label: "Free first, optional Freepik fallback", info: "Saved photos → Pexels → Pixabay → Openverse; paid stock only if you enable it below" },
     { value: "free", label: "Free sources only", info: "Never request Freepik photos or credits" },
     { value: "pexels", label: "Pexels only", info: "Free Pexels stock photographs" },
     { value: "pixabay", label: "Pixabay only", info: "Free Pixabay stock photographs" },
@@ -1958,12 +1961,13 @@ function CourseImagesPanel() {
     setJob(null);
     setReviewJob(null);
     setSelectedImages([]);
+    setReplacementQueries({});
     setError("");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || busy) return;
+    if (!file || busy || reviewJob || job) return;
     setBusy(true);
     setError("");
     setJob(null);
@@ -1975,6 +1979,7 @@ function CourseImagesPanel() {
       form.append("mode", mode);
       form.append("image_source", imageSource);
       form.append("reuse_existing", String(reuseExisting));
+      form.append("allow_freepik", String(allowFreepik && (imageSource === "mixed" || imageSource === "freepik")));
       form.append("generate_missing", "false");
       form.append("use_openrouter", String(useOpenrouter));
       if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
@@ -1984,6 +1989,7 @@ function CourseImagesPanel() {
         });
         const items: CourseImageCandidate[] = result.details?.previews || [];
         setSelectedImages(items.map((entry) => entry.id));
+        setReplacementQueries({});
         setReviewJob(result);
       } else {
         const result = await apiRequest("/api/v1/course-images/prepare", {
@@ -1999,7 +2005,7 @@ function CourseImagesPanel() {
   }
 
   async function insertReviewedImages() {
-    if (!reviewJob || busy) return;
+    if (!reviewJob || busy || replacingImage !== null) return;
     setBusy(true);
     setError("");
     try {
@@ -2014,6 +2020,30 @@ function CourseImagesPanel() {
       setError(err instanceof Error ? err.message : "Image insertion failed.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function findFreeReplacement(image: CourseImageCandidate) {
+    if (!reviewJob || busy || replacingImage !== null) return;
+    const search = (replacementQueries[image.id] ?? image.search).trim();
+    if (search.length < 3 || search.length > 110) {
+      setError("Use a short, descriptive search phrase (3–110 characters).");
+      return;
+    }
+    setReplacingImage(image.id);
+    setError("");
+    try {
+      const result: JobResponse = await apiRequest(`/api/v1/course-images/reviews/${reviewJob.id}/replace`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_id: image.id, search }),
+      });
+      setReviewJob(result);
+      setReplacementQueries((current) => ({ ...current, [image.id]: search }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No free alternative was available.");
+    } finally {
+      setReplacingImage(null);
     }
   }
 
@@ -2055,7 +2085,7 @@ function CourseImagesPanel() {
         <section className="card">
           <div className="section-heading">
             <span>02</span><div><h3>Image source and savings</h3>
-            <p>Free sources are tried before any Freepik stock lookup. AI generation stays disabled.</p></div>
+            <p>Use free photos first. Paid stock is off unless you explicitly enable it; AI generation is disabled.</p></div>
           </div>
           <label className="toggle-row">
             <input type="radio" name="image-mode" value="insert" checked={mode === "insert"}
@@ -2076,12 +2106,20 @@ function CourseImagesPanel() {
                 <label className={`image-source-option ${imageSource === source.value ? "selected" : ""}`} key={source.value}>
                   <input type="radio" name="image-source" value={source.value}
                     checked={imageSource === source.value}
-                    onChange={() => { setImageSource(source.value); resetResults(); }} />
+                    onChange={() => { setImageSource(source.value); setAllowFreepik(source.value === "freepik"); resetResults(); }} />
                   <span><strong>{source.label}</strong><small>{source.info}</small></span>
                 </label>
               ))}
             </div>
           </fieldset>
+          {(imageSource === "mixed" || imageSource === "freepik") && (
+            <label className="toggle-row">
+              <input type="checkbox" checked={allowFreepik}
+                onChange={(event) => { setAllowFreepik(event.target.checked); resetResults(); }} />
+              <span><strong>Allow paid Freepik stock fallback</strong>
+                <small>Off by default. If enabled, backend caps attempted searches and stock downloads. This never generates AI images.</small></span>
+            </label>
+          )}
           <label className="toggle-row">
             <input type="checkbox" checked={reuseExisting}
               onChange={(event) => { setReuseExisting(event.target.checked); resetResults(); }} />
@@ -2104,7 +2142,9 @@ function CourseImagesPanel() {
           </label>
           {imageSource === "mixed" && (
             <p className="image-cost-notice">
-              Freepik fallback runs automatically without a separate approval prompt, as selected. Its licensed stock downloads may incur charges; the backend limits them per job. No AI image generation is used.
+              {allowFreepik
+                ? "Freepik stock fallback is enabled. It may consume provider credits even if a result is rejected. Review images before inserting."
+                : "Credit-safe mode: Mixed currently uses free sources and the image library only. No Freepik image generation or stock API calls will be made."}
             </p>
           )}
         </section>
@@ -2123,8 +2163,11 @@ function CourseImagesPanel() {
           </div>
           <div className="image-summary-grid">
             <div><strong>{candidates.length}</strong><span>Photos found</span></div>
+            <div><strong>{reviewJob.details?.eligible_headings ?? 0}</strong><span>Eligible headings</span></div>
+            <div><strong>{reviewJob.details?.planned_image_positions ?? 0}</strong><span>Planned image positions</span></div>
             <div><strong>{reviewJob.details?.image_library_hits ?? 0}</strong><span>Library reuses</span></div>
-            <div><strong>{reviewJob.details?.freepik_stock_downloads ?? 0}</strong><span>Freepik downloads</span></div>
+            <div><strong>{reviewJob.details?.freepik_search_attempts ?? 0}</strong><span>Freepik lookup attempts</span></div>
+            <div><strong>{reviewJob.details?.stock_lookups_attempted ?? 0}</strong><span>Stock-photo searches</span></div>
             <div><strong>0</strong><span>AI image generations</span></div>
           </div>
           {candidates.length > 0 ? (
@@ -2136,20 +2179,32 @@ function CourseImagesPanel() {
               </div>
               <div className="image-review-grid">
                 {candidates.map((item) => (
-                  <label className={`image-review-card ${selectedImages.includes(item.id) ? "selected" : ""}`} key={item.id}>
+                  <div className={`image-review-card ${selectedImages.includes(item.id) ? "selected" : ""}`} key={item.id}>
                     <img src={apiUrl(item.preview_url)} alt={`Suggested ${item.source} photograph for ${item.heading}`} loading="lazy" />
                     <span className="image-review-body">
-                      <span className="image-review-heading"><input type="checkbox"
+                      <label className="image-review-heading"><input type="checkbox"
                         checked={selectedImages.includes(item.id)}
                         onChange={(event) => setSelectedImages((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />
                         <strong>{item.heading}</strong>
-                      </span>
+                      </label>
                       <small>{item.chapter}</small>
                       <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
                       {item.author && <small>Photo: {item.author}</small>}
                       {item.source_url?.startsWith("https://") && <a href={item.source_url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>View source and licence</a>}
+                      <span className="image-replace-controls">
+                        <input aria-label={`Free photo search for ${item.heading}`}
+                          value={replacementQueries[item.id] ?? item.search}
+                          maxLength={110}
+                          onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); findFreeReplacement(item); } }}
+                          onChange={(event) => setReplacementQueries((current) => ({ ...current, [item.id]: event.target.value }))} />
+                        <button type="button" className="button secondary small"
+                          disabled={busy || replacingImage !== null || (reviewJob.details?.free_replacements_used ?? 0) >= 8}
+                          onClick={() => findFreeReplacement(item)}>
+                          {replacingImage === item.id ? "Searching…" : "Find free alternative"}
+                        </button>
+                      </span>
                     </span>
-                  </label>
+                  </div>
                 ))}
               </div>
             </>
@@ -2160,7 +2215,7 @@ function CourseImagesPanel() {
             </details>
           )}
           <div className="image-review-controls">
-            <button type="button" className="button primary large" onClick={insertReviewedImages} disabled={busy}>
+            <button type="button" className="button primary large" onClick={insertReviewedImages} disabled={busy || replacingImage !== null}>
               {busy ? "Adding selected images…" : `Insert ${selectedImages.length} selected image${selectedImages.length === 1 ? "" : "s"} and download`}
             </button>
             <button type="button" className="button secondary" onClick={resetResults} disabled={busy}>Start again</button>
@@ -2181,6 +2236,7 @@ function CourseImagesPanel() {
             <div className="image-summary-grid">
               <div><strong>{details?.image_library_hits ?? 0}</strong><span>Reused from library</span></div>
               <div><strong>{details?.freepik_stock_downloads ?? 0}</strong><span>Freepik stock downloads</span></div>
+              <div><strong>{details?.freepik_search_attempts ?? 0}</strong><span>Freepik lookup attempts</span></div>
               <div><strong>{details?.generation_attempts ?? 0}</strong><span>AI image generations</span></div>
             </div>
           )}

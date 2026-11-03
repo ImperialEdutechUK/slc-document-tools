@@ -149,7 +149,8 @@ class CourseImagesTests(unittest.TestCase):
         provider.freepik_key = "offline-mocked-key"
         result = build_course_image_package(
             chapter(), "Chapter 3.docx", course_name="Confidentiality in Care",
-            mode="insert", image_source="freepik", generate_missing=False, provider=provider,
+            mode="insert", image_source="freepik", generate_missing=False,
+            allow_freepik=True, provider=provider,
         )
         self.assertEqual(result.details["image_source"], "freepik")
         self.assertEqual(result.details["photos_inserted"], 2)

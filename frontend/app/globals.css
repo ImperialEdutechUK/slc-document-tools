@@ -1980,7 +1980,7 @@ a {
 .image-review-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .image-review-controls > span { color: var(--muted); font-size: 14px; margin-right: auto; }
 .image-review-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 17px; }
-.image-review-card { display: flex; flex-direction: column; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; }
+.image-review-card { display: flex; flex-direction: column; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
 .image-review-card.selected { border-color: var(--teal); }
 .image-review-card img { display: block; width: 100%; height: 178px; object-fit: cover; background: var(--surface-3); }
 .image-review-body { padding: 14px; display: flex; flex-direction: column; gap: 7px; line-height: 1.35; }
@@ -1988,3 +1988,8 @@ a {
 .image-review-body a, .image-result-warnings a { color: var(--teal-bright); font-size: 13px; }
 .image-review-heading { display: flex; gap: 8px; align-items: flex-start; }
 .image-review-heading input { width: 18px; height: 18px; accent-color: var(--teal); flex-shrink: 0; }
+
+/* v26: compact free-only re-search inside each image review card. */
+.image-replace-controls { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.image-replace-controls input { width: 100%; min-width: 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-3); color: var(--text); }
+.image-replace-controls .button { align-self: flex-start; }

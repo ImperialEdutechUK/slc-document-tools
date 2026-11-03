@@ -1,4 +1,4 @@
-> **Document Formatter v25 any-name hyperlink fix:** See [`RELEASE_V25.md`](RELEASE_V25.md) for name-independent image links, image placement, limitations and deployment steps. v25 includes the earlier v23 placement fixes and the v24 free-first Find & Add Images workflow.
+> **Current release v26:** See [`RELEASE_V26.md`](RELEASE_V26.md) for the repaired **Find & Add Images** tab, strict Freepik cost controls, free-image replacements and deployment instructions. The separate v25 any-name linked-image formatting fixes remain included; see [`RELEASE_V25.md`](RELEASE_V25.md).
 
 ## Automatic linked images regardless of hyperlink display text
 
@@ -43,19 +43,19 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - DOCX or ZIP input from the same formatter screen.
 - Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
-### Find & Add Images — v24 free-first workflow
+### Find & Add Images — v26 credit-safe workflow
 
-**Default settings requested:** `image_source=mixed`, `reuse_existing=true`, `preview_images=true`. Freepik approval is **not** requested before a fallback stock download. Freepik **AI generation is disabled** in this workflow to avoid unpredictable generation charges.
+**Defaults:** `image_source=mixed`, `reuse_existing=true`, `preview_images=true`, `allow_freepik=false`, `use_openrouter=false`. Mixed mode works with only free sources and the stored image library until you explicitly enable Freepik stock; paid **AI image generation is disabled** throughout this workflow.
 
 1. Upload a single DOCX or a ZIP of chapter DOCX files.
-2. Click **Find images and preview**. The backend checks its saved free-image library and then tries **Pexels → Pixabay → Openverse** (CC0/public-domain Wikimedia-hosted photos). If none is suitable, **licensed Freepik stock** is attempted automatically, up to `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS` (default **3 successful stock items per job**).
-3. See image thumbnails, chapter/heading placement, origin, licence and photographer. Uncheck unwanted pictures.
+2. Click **Find images and preview**. The backend checks its saved image library and then tries **Pexels → Pixabay → Openverse** (CC0/public-domain Wikimedia-hosted photos). Without the separate opt-in, **zero Freepik calls** are made. If explicitly enabled, Freepik stock is limited to **one search attempt and one successful download** by default, even when the attempt fails.
+3. See image thumbnails, chapter/heading placement, origin, licence and photographer. Uncheck unwanted pictures, or use **Find free alternative** to retry one photograph with better search words (free providers only, up to eight successful replacements per review). The app searches chapter plans in a balanced order, so large ZIPs do not use their entire preview allowance on the first chapter.
 4. Click **Insert selected images and download**. This step uses already acquired bytes, so it makes **no further stock-provider calls**. The DOCX retains all original paragraph text, styles and headings; adding pictures may change page flow. Existing illustrations and Summary/References/Contents headings are skipped.
 5. A single DOCX returns a single DOCX. A ZIP returns a ZIP containing edited chapter DOCX files.
 
 **Saved library:** free-stock JPEGs are cached in the app's existing S3-compatible bucket (`S3_*`) or local `STORAGE_DIR`, keyed to the search and heading. Repeated matching jobs can reuse them instead of making more API requests. For Railway redeploy persistence, configure an S3 bucket; `/tmp` is ephemeral. Freepik licensed stock is **not** cached by default because reuse rights vary by licence. Pixabay search responses are cached for 24 hours as required by Pixabay API terms. No original Word content is stored in the image library (originals for a preview stay in a separate private review bundle).
 
-**Setup:** add `PEXELS_API_KEY` and `PIXABAY_API_KEY` in Railway backend Variables, optionally `FREEPIK_API_KEY` or `MAGNIFIC_API_KEY`; `OPENVERSE_ENABLED=true` requires no key. Use `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=3` and `COURSE_IMAGE_MAX_PREVIEW_IMAGES=16` initially. Set `NEXT_PUBLIC_API_URL` in Vercel and add the Vercel origin to backend `ALLOWED_ORIGINS`. Keys stay server-side. Rebuild/redeploy **both Railway and Vercel** for v24.
+**Setup:** add `PEXELS_API_KEY` and `PIXABAY_API_KEY` in Railway backend Variables, optionally `FREEPIK_API_KEY` or `MAGNIFIC_API_KEY`; `OPENVERSE_ENABLED=true` requires no key. Use `COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=1`, `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=1`, `COURSE_IMAGE_MAX_PREVIEW_IMAGES=16`, `COURSE_IMAGE_MAX_STOCK_LOOKUPS=32`, and `COURSE_IMAGE_MAX_SEARCH_SECONDS=75` initially. Set `NEXT_PUBLIC_API_URL` in Vercel and add the Vercel origin to backend `ALLOWED_ORIGINS`. Keys stay server-side. Rebuild/redeploy **both Railway and Vercel** for v26.
 
 **Other modes:** `free` (never touches Freepik), `pexels`, `pixabay`, `openverse`, and `freepik`. Optional OpenRouter text-only scene refinement is off by default. The guides-and-covers workflow still works without modifying the original documents. Some images or source sites may be unavailable and are skipped with warnings. Users should verify actual image relevance, stock rights and attribution before publishing.
 
@@ -188,7 +188,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.11.03-v25-name-independent-image-links`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.11.03-v26-free-first-image-repair`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -267,7 +267,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend has **152 passing tests, 1 skipped environment-dependent conversion test** in the v25 offline regression suite, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
+The backend has **159 passing tests, 1 skipped environment-dependent conversion test** in the v26 offline regression suite, covering all original workflows plus paid-fallback request limits, custom headings, approved-only photo caching, fair ZIP chapter distribution, free photo replacements and review/confirmation API calls. Live provider accounts, deployed Railway/Vercel and credit billing still require an in-environment check.
 
 ## Next implementation step
 

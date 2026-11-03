@@ -86,7 +86,8 @@ class FreeFirstCourseImagesTests(TestCase):
         self.assertEqual(second.library_hits, 1)
 
     def test_freepik_is_only_final_fallback_and_capped(self):
-        provider = Provider(pexels_key="pkey", pixabay_key="pikey", freepik_key="fkey", openverse_enabled=True, freepik_limit=1, library=ImageLibrary(Store()))
+        provider = Provider(pexels_key="pkey", pixabay_key="pikey", freepik_key="fkey", openverse_enabled=True,
+                            allow_freepik=True, freepik_limit=1, library=ImageLibrary(Store()))
         sequence = []
         class Freepik:
             def search_photo(self, *args, **kwargs):

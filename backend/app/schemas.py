@@ -48,3 +48,8 @@ class CleanSpacingRequest(BaseModel):
 
 class ConfirmCourseImagePreviewRequest(BaseModel):
     selected_ids: list[int] = Field(default_factory=list, max_length=60)
+
+
+class ReplaceCourseImagePreviewRequest(BaseModel):
+    image_id: int = Field(ge=0)
+    search: str = Field(min_length=3, max_length=110)

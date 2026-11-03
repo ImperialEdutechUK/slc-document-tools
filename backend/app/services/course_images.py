@@ -41,7 +41,8 @@ MAX_IMAGE_BYTES = 22 * 1024 * 1024
 MAX_ARCHIVE_FILES = 160
 SKIP_HEADING = re.compile(
     r"\b(summary|summaries|conclusions?|references?|bibliograph(?:y|ies)|"
-    r"table of contents|contents|resources for further reference)\b", re.I
+    r"table of contents|contents|resources for further reference|"
+    r"cover page|title page|acknowledgements?)\b", re.I
 )
 SKIP_DOC = re.compile(r"\b(assignment[\s_-]*brief|written[\s_-]*assignment[\s_-]*template)\b", re.I)
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z'-]+")
@@ -124,10 +125,15 @@ class Provider:
     openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip())
     stock_source: str = "mixed"
     reuse_existing: bool = True
+    save_new_to_library: bool = True
+    # Mixed mode must never spend Freepik credits without an explicit choice.
+    allow_freepik: bool = False
     library: ImageLibrary = field(default_factory=ImageLibrary)
     library_hits: int = 0
     freepik_downloads: int = 0
-    freepik_limit: int = field(default_factory=lambda: max(0, min(30, int(os.getenv("COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS", "3")))))
+    freepik_attempts: int = 0
+    freepik_limit: int = field(default_factory=lambda: max(0, min(10, int(os.getenv("COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS", "1")))))
+    freepik_attempt_limit: int = field(default_factory=lambda: max(0, min(10, int(os.getenv("COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS", "1")))))
     max_generations: int = field(default_factory=lambda: max(0, min(30, int(os.getenv("COURSE_IMAGE_MAX_GENERATIONS", "8")))))
     generations_used: int = 0
     refined_sections: int = 0
@@ -146,7 +152,8 @@ class Provider:
             (source in {"mixed", "free", "pexels"} and self.pexels_key)
             or (source in {"mixed", "free", "pixabay"} and self.pixabay_key)
             or (source in {"mixed", "free", "openverse"} and self.openverse_enabled)
-            or (source in {"mixed", "freepik"} and self.freepik_key and self.freepik_limit > 0)
+            or (source in {"mixed", "freepik"} and self.allow_freepik and self.freepik_key
+                and self.freepik_limit > 0 and self.freepik_attempt_limit > 0)
         )
 
     def _freepik(self) -> FreepikImages:
@@ -154,7 +161,7 @@ class Provider:
         return FreepikImages(self.freepik_key, base=base, header=header)
 
     def _remember(self, query: str, subject: str, picture: Picture, *, portrait: bool) -> None:
-        if self.reuse_existing:
+        if self.reuse_existing and self.save_new_to_library:
             self.library.save(
                 query, subject,
                 SavedImage(picture.payload, picture.source, picture.source_url, picture.identifier, picture.licence, picture.author),
@@ -210,10 +217,13 @@ class Provider:
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Openverse lookup was unsuccessful: {type(exc).__name__}.")
         # Licensed Freepik stock is the final fallback. No AI generation call is made.
-        if source in {"mixed", "freepik"} and self.freepik_key:
-            if self.freepik_downloads >= self.freepik_limit:
-                self.warnings.append("Freepik stock download limit reached for this job; no further paid fallback attempted.")
+        if source in {"mixed", "freepik"} and self.allow_freepik and self.freepik_key:
+            # Count attempts, not only successes; failed headings can cost too.
+            if (self.freepik_downloads >= self.freepik_limit or
+                    self.freepik_attempts >= self.freepik_attempt_limit):
+                self.warnings.append("Freepik request budget reached; no further paid fallback attempted.")
                 return None
+            self.freepik_attempts += 1
             try:
                 result = self._freepik().search_photo(
                     query, subject=subject, portrait=portrait, used=self.used_photos,
@@ -433,13 +443,62 @@ def _picture_after_heading(paragraphs, index: int) -> bool:
     # Check the paragraph directly after the heading and a following spacer,
     # but never a later section or unrelated paragraph.
     for p in paragraphs[index + 1:index + 3]:
-        if p.style and re.match(r"^Heading\s*\d", p.style.name or "", re.I):
+        if _heading_level(p) is not None:
             break
         if p._p.xpath(".//w:drawing") or p._p.xpath(".//w:pict"):
             return True
         if p.text.strip():
             break
     return False
+
+
+def _heading_level(paragraph: Paragraph) -> int | None:
+    """Recognise Word headings, custom headings and carefully numbered bold titles.
+
+    Some supplied course files use a custom style based on Heading 2 or
+    direct-format e.g. '2.3 Safe handling' in Normal. The earlier exact-style
+    check silently reported zero eligible headings for these documents.
+    """
+    style = paragraph.style
+    visited: set[str] = set()
+    for _ in range(8):
+        if style is None or style.style_id in visited:
+            break
+        visited.add(style.style_id)
+        name = (style.name or "").strip()
+        if re.match(r"^toc\b", name, re.I):
+            return None
+        match = re.search(r"\bheading\s*([1-6])\b", name, re.I)
+        if match:
+            return int(match.group(1))
+        for outline in style.element.xpath("./w:pPr/w:outlineLvl"):
+            level = outline.get(qn("w:val"))
+            if level is not None and level.isdigit() and int(level) < 6:
+                return int(level) + 1
+        style = style.base_style
+
+    for outline in paragraph._p.xpath("./w:pPr/w:outlineLvl"):
+        level = outline.get(qn("w:val"))
+        if level is not None and level.isdigit() and int(level) < 6:
+            return int(level) + 1
+
+    text = " ".join(paragraph.text.split())
+    numbered = re.match(
+        r"^(?:(\d{1,2})\.\d{1,2}(?:\.\d{1,2})?\s+|"
+        r"(?:module|unit|chapter)\s*0?\d{1,3}\s*[:.\-]\s+)", text, re.I,
+    )
+    if not numbered or len(text) > 130:
+        return None
+    real_runs = [run for run in paragraph.runs if run.text.strip()]
+    if not real_runs:
+        return None
+    bold_length = sum(len(run.text) for run in real_runs if run.bold or (run.style and run.style.font.bold))
+    text_length = sum(len(run.text) for run in real_runs)
+    if bold_length < 0.6 * max(1, text_length):
+        return None
+    if numbered.group(1):
+        return min(6, 1 + text.count(".", 0, numbered.end()))
+    return 1
 
 
 def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
@@ -488,9 +547,28 @@ def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
         if re.search(pattern, heading_lower):
             action = specific_action
             break
-    topic_tokens = _tokens(heading)[:5] or _tokens(excerpt)[:3]
-    subject_tokens = _tokens(course)[:3]
-    query = " ".join(dict.fromkeys(topic_tokens + subject_tokens + _tokens(stock_tags)[:3]))[:105]
+    # Search for something a camera could actually photograph, rather than
+    # concatenating 8+ abstract course/assessment terms into one API query.
+    # All matches still require human review in the default preview workflow.
+    photo_subjects = (
+        (r"medicat|medicin|prescri|pharmac|\bdos(e|age)\b|\bprn\b", "nurse medication elderly care"),
+        (r"dementia|alzheimer|cognit", "caregiver elderly person care home"),
+        (r"\bpain\b|symptom|physical health", "nurse patient consultation"),
+        (r"confidential|privacy|records|document|filing", "office secure files documents"),
+        (r"food|cater|kitchen", "food preparation professional kitchen"),
+        (r"hygiene|infection|handwash", "healthcare worker washing hands"),
+        (r"risk|hazard|safety", "workplace safety inspection"),
+        (r"teach|student|pupil|child|learning", "teacher students classroom"),
+        (r"account|finance|budget|cost", "accountant calculator office"),
+        (r"leadership|teamwork|management|delegat", "colleagues office team meeting"),
+        (r"project|planning|schedule", "project planning team office"),
+        (r"customer|service|reception", "customer service reception desk"),
+    )
+    query = next((photo_query for pattern, photo_query in photo_subjects
+                  if re.search(pattern, heading.lower(), re.I)), "")
+    if not query:
+        topic_tokens = _tokens(heading)[:2] or _tokens(excerpt)[:2]
+        query = " ".join(dict.fromkeys(topic_tokens + _tokens(stock_tags)[:3]))[:80]
     if not query:
         query = stock_tags
     description = (
@@ -504,17 +582,26 @@ def _scene_context(course: str, heading: str, excerpt: str) -> tuple[str, str]:
 def _plans(document: Document, course_title: str) -> tuple[list[ImagePlan], int]:
     paragraphs = document.paragraphs
     eligible: list[ImagePlan] = []
+    excluded_level: int | None = None
     for i, p in enumerate(paragraphs):
         text = " ".join(p.text.split())
-        if not text or SKIP_HEADING.search(text):
+        if not text:
             continue
-        if not p.style or not re.match(r"^Heading\s*[1-6]$", p.style.name or "", re.I):
+        level = _heading_level(p)
+        if level is None:
             continue
+        if SKIP_HEADING.search(text):
+            excluded_level = level
+            continue
+        if excluded_level is not None:
+            if level > excluded_level:
+                continue
+            excluded_level = None
         if _picture_after_heading(paragraphs, i):
             continue
         context_items = []
         for following in paragraphs[i + 1:i + 7]:
-            if following.style and re.match(r"^Heading\s*[1-6]$", following.style.name or "", re.I):
+            if _heading_level(following) is not None:
                 break
             if following.text.strip():
                 context_items.append(" ".join(following.text.split()))
@@ -727,6 +814,7 @@ def build_course_image_package(
     raw: bytes, filename: str, *, course_name: str = "", mode: str = "guides",
     generate_missing: bool = True, cover_upload: bytes | None = None,
     image_source: str = "mixed", use_openrouter: bool = False, reuse_existing: bool = True,
+    allow_freepik: bool = False,
     provider: Provider | None = None,
 ) -> CourseImagesResult:
     """Return edited Word documents directly, or separate guide+cover assets."""
@@ -744,8 +832,11 @@ def build_course_image_package(
     provider = provider if provider is not None else Provider()
     provider.stock_source = image_source
     provider.reuse_existing = reuse_existing
+    provider.allow_freepik = allow_freepik
     if image_source == "generate":
         raise CourseImagesError("AI image generation is currently disabled. Select a stock photo source.")
+    if image_source == "freepik" and not allow_freepik and mode == "insert":
+        raise CourseImagesError("Enable Freepik stock access explicitly, or choose free sources only.")
     generate_missing = False
     if mode == "insert" and not provider.can_acquire(generate=generate_missing):
         raise CourseImagesError(
@@ -854,6 +945,8 @@ def build_course_image_package(
         "openrouter_refined_sections": provider.refined_sections,
         "generation_attempts": provider.generations_used,
         "freepik_stock_downloads": provider.freepik_downloads,
+        "freepik_search_attempts": provider.freepik_attempts,
+        "freepik_enabled": provider.allow_freepik,
         "image_library_hits": provider.library_hits,
         "reuse_existing": reuse_existing,
         "image_sources": sources,
