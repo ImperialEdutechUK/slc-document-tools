@@ -1,14 +1,20 @@
-> **Document Formatter v23 image placement fix:** See [`IMAGE_INSERTION_V23.md`](IMAGE_INSERTION_V23.md) for correction of downloaded-but-not-inserted photo links and deployment steps.
+> **Document Formatter v25 any-name hyperlink fix:** See [`RELEASE_V25.md`](RELEASE_V25.md) for name-independent image links, image placement, limitations and deployment steps. v25 includes the earlier v23 placement fixes and the v24 free-first Find & Add Images workflow.
 
-## Automatic image links without numbered labels
+## Automatic linked images regardless of hyperlink display text
 
 In the **Document Formatter** tab, enable **Automatically retrieve linked images**.
-The formatter now recognises image-specific hyperlinks labelled with arbitrary
-text (e.g. **Workplace photo**, **See photograph**, **Click here**) and embeds
-available JPG/PNG/WebP photographs after the corresponding linked paragraph.
-Numbered IMAGE1 placeholders still work, while ordinary website links and
-references are ignored. See `UNNUMBERED_IMAGE_LINKS_FIX.md` for supported link
-types, downloading limitations, verification and deployment steps.
+The formatter tests the actual external Word hyperlink destination, not the
+visible label. A real image can be linked as **Image 01**, **Click here**,
+**Workplace photo**, or another name. Direct JPG/PNG/WebP responses are
+verified before embedding; known photo-page links can also supply an advertised
+image. Genuine `Image 01` marker lines are replaced by the photo, while links
+within ordinary lesson text stay intact and receive a picture beneath them.
+
+Normal webpages that are not image sources are kept unchanged (the UI reports
+**NOT AN IMAGE**). References, Summary and Contents sections are excluded.
+Authenticated, blocked, expired, internal-only and non-image URLs cannot be
+turned into images merely because the display text is underlined/blue.
+See `RELEASE_V25.md` and `UNNUMBERED_IMAGE_LINKS_FIX.md`.
 
 # SLC Document Tools — Vercel + Railway migration
 
@@ -37,23 +43,23 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - DOCX or ZIP input from the same formatter screen.
 - Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
-### Find & Add Images — new option
+### Find & Add Images — v24 free-first workflow
 
-A dedicated **Find & Add Images** tab now supports chapters with no existing photographs. It follows the uploaded course-image master prompt (see `docs/COURSE_IMAGE_MASTER_PROMPT.txt`). Upload a DOCX or ZIP of chapters and choose:
+**Default settings requested:** `image_source=mixed`, `reuse_existing=true`, `preview_images=true`. Freepik approval is **not** requested before a fallback stock download. Freepik **AI generation is disabled** in this workflow to avoid unpredictable generation charges.
 
-- **Automatically add images to Word (default):** choose Pexels stock, Freepik/Magnific stock, both stock catalogues or Freepik AI generation. Suitable photographs are inserted beneath approximately 50% of eligible headings. Upload **one DOCX to download one enhanced DOCX directly**; upload a **ZIP of chapters to download a ZIP containing only enhanced DOCX files** (no guide or cover folders). Lesson wording and styles are preserved, although inserting photographs can change page flow. Cover generation is skipped in this mode.
-- **Image search guides & covers (optional):** creates one DOCX guide per chapter with relevant photograph descriptions, precise heading-based placements, clickable Pexels/StockSnap searches and (when a photo source is available) a course cover with a blank charcoal lower panel and gold separator. It never modifies lesson documents and the output ZIP has only `Matching Image Search Guides/` and `Cover Images/`.
-- **OpenRouter visual-scene refinement:** optional text-only AI analysis of headings and short excerpts makes image searches and descriptions more relevant. Requests are opt-in and use server-side credentials. If the model fails, the original rule-based plans are retained.
+1. Upload a single DOCX or a ZIP of chapter DOCX files.
+2. Click **Find images and preview**. The backend checks its saved free-image library and then tries **Pexels → Pixabay → Openverse** (CC0/public-domain Wikimedia-hosted photos). If none is suitable, **licensed Freepik stock** is attempted automatically, up to `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS` (default **3 successful stock items per job**).
+3. See image thumbnails, chapter/heading placement, origin, licence and photographer. Uncheck unwanted pictures.
+4. Click **Insert selected images and download**. This step uses already acquired bytes, so it makes **no further stock-provider calls**. The DOCX retains all original paragraph text, styles and headings; adding pictures may change page flow. Existing illustrations and Summary/References/Contents headings are skipped.
+5. A single DOCX returns a single DOCX. A ZIP returns a ZIP containing edited chapter DOCX files.
 
-All four image-source options now appear as accessible, high-contrast radio cards instead of an operating-system dropdown. The long photo-search and "What stays unchanged?" explanatory text has been removed from the web interface; licensing guidance remains in `docs/COURSE_IMAGES_WORKFLOW.md`.
+**Saved library:** free-stock JPEGs are cached in the app's existing S3-compatible bucket (`S3_*`) or local `STORAGE_DIR`, keyed to the search and heading. Repeated matching jobs can reuse them instead of making more API requests. For Railway redeploy persistence, configure an S3 bucket; `/tmp` is ephemeral. Freepik licensed stock is **not** cached by default because reuse rights vary by licence. Pixabay search responses are cached for 24 hours as required by Pixabay API terms. No original Word content is stored in the image library (originals for a preview stay in a separate private review bundle).
 
-Summary/Conclusion/References/Contents headings are excluded; repeated stock photos are avoided. Without image provider keys, the guide-only workflow still functions, but auto-insertion and new photographic covers require configuration.
+**Setup:** add `PEXELS_API_KEY` and `PIXABAY_API_KEY` in Railway backend Variables, optionally `FREEPIK_API_KEY` or `MAGNIFIC_API_KEY`; `OPENVERSE_ENABLED=true` requires no key. Use `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=3` and `COURSE_IMAGE_MAX_PREVIEW_IMAGES=16` initially. Set `NEXT_PUBLIC_API_URL` in Vercel and add the Vercel origin to backend `ALLOWED_ORIGINS`. Keys stay server-side. Rebuild/redeploy **both Railway and Vercel** for v24.
 
-Backend environment variables: `FREEPIK_API_KEY` (or `MAGNIFIC_API_KEY`) for Freepik stock search and AI image generation, `OPENROUTER_API_KEY` for optional scene understanding, and optionally `PEXELS_API_KEY` for free Pexels stock downloads or `OPENAI_API_KEY` for direct OpenAI image generation fallback. Generation defaults off and is capped at 8 attempts per job (configurable). Freepik stock has usage/attribution terms that must be verified; image and model calls may consume API credits. Credentials remain server-side. OpenRouter is not used as an image generation key.
+**Other modes:** `free` (never touches Freepik), `pexels`, `pixabay`, `openverse`, and `freepik`. Optional OpenRouter text-only scene refinement is off by default. The guides-and-covers workflow still works without modifying the original documents. Some images or source sites may be unavailable and are skipped with warnings. Users should verify actual image relevance, stock rights and attribution before publishing.
 
-For security and licensing, this deliverable omits any browser-session authentication tokens and proprietary font binaries from the uploaded project. Deploy approved, licensed Garamond font files privately to `backend/fonts/` where required by existing PDF conversion.
-
-Read `docs/COURSE_IMAGES_WORKFLOW.md` for complete instructions and API details.
+For API details and provider limitations, see `docs/FREE_FIRST_IMAGE_WORKFLOW.md`.
 
 ## ZIP batch formatting
 
@@ -182,7 +188,7 @@ The backend health check is:
 GET /health
 ```
 
-The response includes `build: 2026.10.26-v19-direct-word-download-visible-image-options`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
+The response includes `build: 2026.11.03-v25-name-independent-image-links`. The same build value is shown beside completed frontend jobs, making it easy to confirm that Railway is serving the new deployment rather than an older cached backend.
 
 ## Vercel deployment
 
@@ -261,7 +267,7 @@ cd backend
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The backend currently has **100 passing tests, 1 skipped environment-dependent conversion test**, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
+The backend has **152 passing tests, 1 skipped environment-dependent conversion test** in the v25 offline regression suite, covering the original formatter helpers, page-aware cover positioning, safe ZIP handling, batch formatting, linked-image detection/manual overrides, PDF editing, PDF cover replacement, and Word-to-PDF conversion.
 
 ## Next implementation step
 

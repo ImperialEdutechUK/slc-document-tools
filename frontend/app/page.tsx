@@ -1871,10 +1871,11 @@ function FormatterPanel() {
                   const placed = placedImageNumbers.includes(entry.number);
                   const downloaded = entry.status === "downloaded";
                   const manual = entry.status === "manual_override";
-                  const className = downloaded || manual
+                  const skipped = entry.status === "skipped";
+                  const className = skipped ? "skipped" : downloaded || manual
                     ? placed ? "downloaded" : "failed"
                     : "failed";
-                  const label = downloaded || manual
+                  const label = skipped ? "NOT AN IMAGE" : downloaded || manual
                     ? placed ? "INSERTED" : "NOT INSERTED"
                     : "DOWNLOAD FAILED";
                   return (
@@ -1888,7 +1889,9 @@ function FormatterPanel() {
                           ? `Embedded in the formatted Word document (${entry.source_type})`
                           : downloaded
                             ? "Downloaded successfully, but the source photo link was not found after formatting."
-                            : entry.message || entry.source_type}
+                            : skipped
+                              ? "Webpage link left unchanged because its response was not a downloadable image."
+                              : entry.message || entry.source_type}
                       </small>
                     </div>
                   );
@@ -1910,25 +1913,53 @@ function FormatterPanel() {
    IMAGE FINDER, SEARCH GUIDES AND COURSE COVERS
 ------------------------------------------------------- */
 
+type CourseImageCandidate = {
+  id: number;
+  chapter: string;
+  heading: string;
+  search: string;
+  source: string;
+  source_url?: string;
+  licence?: string;
+  author?: string;
+  reused?: boolean;
+  preview_url: string;
+};
+
 function CourseImagesPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [courseName, setCourseName] = useState("");
   const [mode, setMode] = useState<"guides" | "insert">("insert");
-  const [imageSource, setImageSource] = useState<"auto" | "freepik" | "pexels" | "generate">("auto");
-  const [generateMissing, setGenerateMissing] = useState(false);
+  const [imageSource, setImageSource] = useState<"mixed" | "free" | "pexels" | "pixabay" | "openverse" | "freepik">("mixed");
+  const [reuseExisting, setReuseExisting] = useState(true);
+  const [previewImages, setPreviewImages] = useState(true);
   const [useOpenrouter, setUseOpenrouter] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
+  const [reviewJob, setReviewJob] = useState<JobResponse | null>(null);
+  const [selectedImages, setSelectedImages] = useState<number[]>([]);
 
-  // Render these as visible radio cards rather than a browser-native <select>.
-  // Native dark-mode option menus appear grey or unreadable on some browsers.
   const imageSources = [
-    { value: "auto", label: "Pexels, then Freepik", info: "Search both stock-photo libraries" },
-    { value: "freepik", label: "Freepik only", info: "Search Freepik stock photographs" },
-    { value: "pexels", label: "Pexels only", info: "Search Pexels stock photographs" },
+    { value: "mixed", label: "Free first, Freepik fallback", info: "Saved images → Pexels → Pixabay → Openverse → licensed Freepik stock if needed" },
+    { value: "free", label: "Free sources only", info: "Never request Freepik photos or credits" },
+    { value: "pexels", label: "Pexels only", info: "Free Pexels stock photographs" },
+    { value: "pixabay", label: "Pixabay only", info: "Free Pixabay stock photographs" },
+    { value: "openverse", label: "Openverse only", info: "CC0 and public-domain Wikimedia-hosted photographs" },
+    { value: "freepik", label: "Freepik stock only", info: "Freepik API stock downloads may incur charges" },
   ] as const;
+
+  const candidates: CourseImageCandidate[] = Array.isArray(reviewJob?.details?.previews)
+    ? reviewJob!.details!.previews
+    : [];
+
+  function resetResults() {
+    setJob(null);
+    setReviewJob(null);
+    setSelectedImages([]);
+    setError("");
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1936,22 +1967,51 @@ function CourseImagesPanel() {
     setBusy(true);
     setError("");
     setJob(null);
+    setReviewJob(null);
     try {
       const form = new FormData();
       form.append("document", file);
       form.append("course_name", courseName);
       form.append("mode", mode);
       form.append("image_source", imageSource);
+      form.append("reuse_existing", String(reuseExisting));
       form.append("generate_missing", "false");
       form.append("use_openrouter", String(useOpenrouter));
       if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
-      const result = await apiRequest("/api/v1/course-images/prepare", {
-        method: "POST",
-        body: form,
-      });
-      setJob(result);
+      if (mode === "insert" && previewImages) {
+        const result: JobResponse = await apiRequest("/api/v1/course-images/review", {
+          method: "POST", body: form,
+        });
+        const items: CourseImageCandidate[] = result.details?.previews || [];
+        setSelectedImages(items.map((entry) => entry.id));
+        setReviewJob(result);
+      } else {
+        const result = await apiRequest("/api/v1/course-images/prepare", {
+          method: "POST", body: form,
+        });
+        setJob(result);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Image preparation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function insertReviewedImages() {
+    if (!reviewJob || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiRequest(`/api/v1/course-images/reviews/${reviewJob.id}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selected_ids: selectedImages }),
+      });
+      setJob(result);
+      setReviewJob(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Image insertion failed.");
     } finally {
       setBusy(false);
     }
@@ -1966,126 +2026,169 @@ function CourseImagesPanel() {
         <div>
           <span className="eyebrow">SLC Course Image Workflow</span>
           <h2>Find &amp; Add Images</h2>
-          <p>Add suitable photographs beneath chapter headings and download the finished Word document.</p>
+          <p>Find relevant photographs at the lowest available cost, review them, and keep your original Word text and headings unchanged.</p>
         </div>
         <div className="hero-badge">IMG</div>
       </section>
-
       <div className="two-column">
         <section className="card">
           <div className="section-heading">
-            <span>01</span>
-            <div>
-              <h3>Upload documents</h3>
-              <p>Upload one Word document or a ZIP containing multiple Word chapters. ZIP uploads are processed in a batch and returned as a ZIP.</p>
-            </div>
+            <span>01</span><div><h3>Upload documents</h3>
+            <p>Upload one Word document or a ZIP of Word chapters. Edited chapters are returned in the same format.</p></div>
           </div>
           <FileField
-            label="Course DOCX / ZIP"
-            accept=".docx,.zip"
-            onChange={(files) => { setFile(files[0] || null); setJob(null); }}
-            help={file?.name || "Choose a .docx file or .zip containing Word (.docx) chapters"}
+            label="Course DOCX / ZIP" accept=".docx,.zip"
+            onChange={(files) => { setFile(files[0] || null); resetResults(); }}
+            help={file?.name || "Choose a .docx file or a .zip containing Word chapters"}
           />
           <label className="input-label">
             Course / Module Title
-            <input
-              value={courseName}
-              placeholder="Optional – otherwise use uploaded file names"
-              onChange={(event) => setCourseName(event.target.value)}
-            />
+            <input value={courseName} placeholder="Optional – otherwise use file names"
+              onChange={(event) => { setCourseName(event.target.value); resetResults(); }} />
           </label>
           {mode === "guides" && (
-            <FileField
-              label="Existing cover image (optional)"
-              accept=".png,.jpg,.jpeg,.webp"
-              onChange={(files) => { setCoverFile(files[0] || null); setJob(null); }}
-              help={coverFile?.name || "Colour-correct or reuse a supplied cover photo"}
-            />
+            <FileField label="Existing cover image (optional)" accept=".png,.jpg,.jpeg,.webp"
+              onChange={(files) => { setCoverFile(files[0] || null); resetResults(); }}
+              help={coverFile?.name || "Reuse or colour-correct an existing cover image"} />
           )}
         </section>
-
         <section className="card">
           <div className="section-heading">
-            <span>02</span>
-            <div>
-              <h3>Choose image settings</h3>
-              <p>Choose a stock photo source. AI image generation is disabled.</p>
-            </div>
+            <span>02</span><div><h3>Image source and savings</h3>
+            <p>Free sources are tried before any Freepik stock lookup. AI generation stays disabled.</p></div>
           </div>
           <label className="toggle-row">
-            <input
-              type="radio" name="image-mode" value="insert"
-              checked={mode === "insert"}
-              onChange={() => { setMode("insert"); setJob(null); }}
-            />
-            <span>
-              <strong>Add images to my Word document</strong>
-              <small>Download a finished Word file, or a ZIP of edited Word files for a batch upload.</small>
-            </span>
+            <input type="radio" name="image-mode" value="insert" checked={mode === "insert"}
+              onChange={() => { setMode("insert"); resetResults(); }} />
+            <span><strong>Add images to my Word document</strong>
+              <small>Keep all existing Word paragraphs and headings.</small></span>
           </label>
           <label className="toggle-row">
-            <input
-              type="radio" name="image-mode" value="guides"
-              checked={mode === "guides"}
-              onChange={() => { setMode("guides"); setJob(null); }}
-            />
-            <span>
-              <strong>Image guides &amp; covers (optional)</strong>
-              <small>Create a separate guide without editing the original document.</small>
-            </span>
+            <input type="radio" name="image-mode" value="guides" checked={mode === "guides"}
+              onChange={() => { setMode("guides"); resetResults(); }} />
+            <span><strong>Search guides and covers</strong>
+              <small>Create a guide without modifying the original document.</small></span>
           </label>
           <fieldset className="image-source-fieldset">
             <legend>Image source</legend>
             <div className="image-source-options">
               {imageSources.map((source) => (
-                <label
-                  className={`image-source-option ${imageSource === source.value ? "selected" : ""}`}
-                  key={source.value}
-                >
-                  <input
-                    type="radio"
-                    name="image-source"
-                    value={source.value}
+                <label className={`image-source-option ${imageSource === source.value ? "selected" : ""}`} key={source.value}>
+                  <input type="radio" name="image-source" value={source.value}
                     checked={imageSource === source.value}
-                    onChange={() => { setImageSource(source.value); setJob(null); }}
-                  />
-                  <span>
-                    <strong>{source.label}</strong>
-                    <small>{source.info}</small>
-                  </span>
+                    onChange={() => { setImageSource(source.value); resetResults(); }} />
+                  <span><strong>{source.label}</strong><small>{source.info}</small></span>
                 </label>
               ))}
             </div>
           </fieldset>
           <label className="toggle-row">
-            <input
-              type="checkbox" checked={useOpenrouter}
-              onChange={(event) => { setUseOpenrouter(event.target.checked); setJob(null); }}
-            />
-            <span>
-              <strong>Use OpenRouter to improve image search ideas</strong>
-              <small>Optional AI analysis of chapter headings and short passages for more specific searches and photo descriptions. Needs OPENROUTER_API_KEY on the backend.</small>
-            </span>
+            <input type="checkbox" checked={reuseExisting}
+              onChange={(event) => { setReuseExisting(event.target.checked); resetResults(); }} />
+            <span><strong>Reuse images from the saved library</strong>
+              <small>Reuse matching, previously downloaded free photos across jobs (works with persistent Railway storage).</small></span>
           </label>
+          {mode === "insert" && (
+            <label className="toggle-row">
+              <input type="checkbox" checked={previewImages}
+                onChange={(event) => { setPreviewImages(event.target.checked); resetResults(); }} />
+              <span><strong>Preview images before adding</strong>
+                <small>Review candidates and uncheck unwanted images before producing the Word file.</small></span>
+            </label>
+          )}
+          <label className="toggle-row">
+            <input type="checkbox" checked={useOpenrouter}
+              onChange={(event) => { setUseOpenrouter(event.target.checked); resetResults(); }} />
+            <span><strong>Improve search queries with OpenRouter (optional)</strong>
+              <small>May incur text API costs. No AI image generation.</small></span>
+          </label>
+          {imageSource === "mixed" && (
+            <p className="image-cost-notice">
+              Freepik fallback runs automatically without a separate approval prompt, as selected. Its licensed stock downloads may incur charges; the backend limits them per job. No AI image generation is used.
+            </p>
+          )}
         </section>
       </div>
-
       {error && <div className="error-box" role="alert">{error}</div>}
-      <button type="submit" className="button primary large" disabled={!file || busy}>
-        {busy ? "Adding images…" : mode === "guides" ? "Create image guides & covers" : file?.name.toLowerCase().endsWith(".zip") ? "Add images to ZIP chapters" : "Add images to Word"}
-      </button>
+      {!reviewJob && (
+        <button type="submit" className="button primary large" disabled={!file || busy}>
+          {busy ? "Searching image sources…" : mode === "guides" ? "Create search guides" : previewImages ? "Find images and preview" : "Add images to Word"}
+        </button>
+      )}
+      {reviewJob && !job && (
+        <section className="card image-review-section">
+          <div className="section-heading">
+            <span>03</span><div><h3>Review your suggested images</h3>
+              <p>Uncheck any image you do not want. Images are already downloaded, so confirming does not make another provider request.</p></div>
+          </div>
+          <div className="image-summary-grid">
+            <div><strong>{candidates.length}</strong><span>Photos found</span></div>
+            <div><strong>{reviewJob.details?.image_library_hits ?? 0}</strong><span>Library reuses</span></div>
+            <div><strong>{reviewJob.details?.freepik_stock_downloads ?? 0}</strong><span>Freepik downloads</span></div>
+            <div><strong>0</strong><span>AI image generations</span></div>
+          </div>
+          {candidates.length > 0 ? (
+            <>
+              <div className="image-review-controls">
+                <span>{selectedImages.length} of {candidates.length} selected</span>
+                <button type="button" className="button secondary" onClick={() => setSelectedImages(candidates.map((item) => item.id))}>Select all</button>
+                <button type="button" className="button secondary" onClick={() => setSelectedImages([])}>Deselect all</button>
+              </div>
+              <div className="image-review-grid">
+                {candidates.map((item) => (
+                  <label className={`image-review-card ${selectedImages.includes(item.id) ? "selected" : ""}`} key={item.id}>
+                    <img src={apiUrl(item.preview_url)} alt={`Suggested ${item.source} photograph for ${item.heading}`} loading="lazy" />
+                    <span className="image-review-body">
+                      <span className="image-review-heading"><input type="checkbox"
+                        checked={selectedImages.includes(item.id)}
+                        onChange={(event) => setSelectedImages((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />
+                        <strong>{item.heading}</strong>
+                      </span>
+                      <small>{item.chapter}</small>
+                      <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
+                      {item.author && <small>Photo: {item.author}</small>}
+                      {item.source_url?.startsWith("https://") && <a href={item.source_url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>View source and licence</a>}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : <p className="image-cost-notice">No matching photographs were found. The Word output can still be downloaded unchanged.</p>}
+          {Array.isArray(reviewJob.details?.warnings) && reviewJob.details.warnings.length > 0 && (
+            <details className="image-result-warnings"><summary>Show search notices ({reviewJob.details.warnings.length})</summary>
+              <ul>{reviewJob.details.warnings.map((notice: string, index: number) => <li key={index}>{notice}</li>)}</ul>
+            </details>
+          )}
+          <div className="image-review-controls">
+            <button type="button" className="button primary large" onClick={insertReviewedImages} disabled={busy}>
+              {busy ? "Adding selected images…" : `Insert ${selectedImages.length} selected image${selectedImages.length === 1 ? "" : "s"} and download`}
+            </button>
+            <button type="button" className="button secondary" onClick={resetResults} disabled={busy}>Start again</button>
+          </div>
+        </section>
+      )}
       {job && (
         <>
-          <JobResult
-            job={job}
-            title={mode === "guides" ? "Image guides ready" : "Your document is ready"}
-            downloadLabel={mode === "guides" ? "Download guides ZIP" : isWordOutput ? "Download Word document" : "Download edited Word files ZIP"}
-          />
+          <JobResult job={job}
+            title={mode === "guides" ? "Image guides ready" : "Your updated Word document is ready"}
+            downloadLabel={mode === "guides" ? "Download guides ZIP" : isWordOutput ? "Download Word document" : "Download edited Word ZIP"} />
           <p className="image-completion-note">
             {mode === "insert"
-              ? `${details?.photos_inserted ?? 0} image(s) added to ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP above."}`
+              ? `${details?.photos_inserted ?? 0} image(s) embedded in ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP above."}`
               : `${details?.guides_created ?? 0} guide(s) created.`}
           </p>
+          {mode === "insert" && (
+            <div className="image-summary-grid">
+              <div><strong>{details?.image_library_hits ?? 0}</strong><span>Reused from library</span></div>
+              <div><strong>{details?.freepik_stock_downloads ?? 0}</strong><span>Freepik stock downloads</span></div>
+              <div><strong>{details?.generation_attempts ?? 0}</strong><span>AI image generations</span></div>
+            </div>
+          )}
+          {Array.isArray(details?.image_sources) && details.image_sources.length > 0 && (
+            <details className="image-result-warnings"><summary>Show image sources and licence information</summary>
+              <ul>{details.image_sources.map((item: any, i: number) => <li key={i}>{item.heading}: {item.provider} ({item.licence || "licence not specified"}) {item.author ? `by ${item.author}` : ""} {item.source_url && <a href={item.source_url} target="_blank" rel="noopener noreferrer">Source</a>}</li>)}</ul>
+            </details>
+          )}
           {Array.isArray(details?.warnings) && details.warnings.length > 0 && (
             <details className="image-result-warnings">
               <summary>Show {details.warnings.length} processing notice(s)</summary>

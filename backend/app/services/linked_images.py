@@ -71,6 +71,9 @@ class LinkedImageSource:
     label: str = ""
     numbered: bool = True
     anchor_text: str = ""
+    # Labels do not decide if a direct URL can be downloaded.  HTML previews
+    # are only permitted where the link actually looks like an image source.
+    allow_page_preview: bool = True
 
 
 @dataclass
@@ -98,6 +101,7 @@ class LinkedImageResult:
             "downloaded": sum(1 for entry in self.entries if entry.status == "downloaded"),
             "failed": sum(1 for entry in self.entries if entry.status == "failed"),
             "manual_override": sum(1 for entry in self.entries if entry.status == "manual_override"),
+            "skipped": sum(1 for entry in self.entries if entry.status == "skipped"),
         }
 
 
@@ -171,22 +175,35 @@ class _DiscoveredLink:
     label: str
     number: int | None = None
     anchor_text: str = ""
+    is_word_hyperlink: bool = False
+    allow_page_preview: bool = False
 
 
 def scan_linked_image_sources(
     docx_bytes: bytes, *, occupied_numbers: Iterable[int] = (),
 ) -> tuple[list[LinkedImageSource], list[str]]:
-    """Scan actual Word hyperlinks and direct URLs, preserving their document order.
+    """Identify image *destinations*, irrespective of visible hyperlink names.
 
-    Numbered placeholders retain their original numbers. Other genuine image
-    links receive non-conflicting internal numbers for the existing DOCX image
-    catalog; users do not need to rename or number any hyperlink.
+    Every external Word hyperlink is considered, including labels like "here"
+    and opaque image delivery URLs with no file extension.  Plain URLs in
+    paragraphs are considered only when an image cue is present.  The downloader
+    checks the actual returned bytes before accepting an unrecognised target;
+    generic website social-preview thumbnails are never treated as photos.
+
+    Multiple links sharing a label such as "Image 01" remain distinct, with
+    non-conflicting internal image IDs.  Their document positions are anchored
+    before any cover/TOC edits, so displayed text is not used as the key.
     """
     warnings: list[str] = []
     try:
         with zipfile.ZipFile(BytesIO(docx_bytes)) as archive:
             document_xml = archive.read("word/document.xml")
-            rels_xml = archive.read("word/_rels/document.xml.rels")
+            # DOCX documents with only field hyperlinks or bare URLs may have
+            # no document.xml.rels at all.  This is valid Word packaging.
+            try:
+                rels_xml = archive.read("word/_rels/document.xml.rels")
+            except KeyError:
+                rels_xml = b'<Relationships xmlns="' + PR_NS.encode() + b'"/>'
     except (zipfile.BadZipFile, KeyError) as exc:
         raise ValueError("The uploaded DOCX package is not readable.") from exc
 
@@ -207,12 +224,12 @@ def scan_linked_image_sources(
     max_document_number = max(occupied, default=0)
 
     for paragraph in root.iter(_qn(W_NS, "p")):
-        text = _normalise_link_text("".join(node.text or "" for node in paragraph.iter(_qn(W_NS, "t"))))
+        text = _normalise_link_text("".join(
+            node.text or "" for node in paragraph.iter(_qn(W_NS, "t"))
+        ))
         style = paragraph.find(f"{_qn(W_NS, 'pPr')}/{_qn(W_NS, 'pStyle')}")
         style_name = (style.get(_qn(W_NS, "val"), "") if style is not None else "").lower()
         is_heading = "heading" in style_name or style_name in {"title", "subtitle"}
-        # Some Word imports omit heading styles. A standalone References,
-        # Summary or Table of Contents paragraph is still a section boundary.
         if EXCLUDED_SECTION_RE.fullmatch(text):
             in_excluded_section = True
         elif is_heading and text:
@@ -233,30 +250,45 @@ def scan_linked_image_sources(
             rel_id = hyperlink.get(_qn(R_NS, "id"))
             url = relationships.get(rel_id)
             if not url:
+                # A Word bookmark/internal hyperlink cannot supply an image URL.
                 continue
             url = _clean_url(url)
             label = _normalise_link_text("".join(
                 node.text or "" for node in hyperlink.iter(_qn(W_NS, "t"))
             ))
-            links.append(_DiscoveredLink(url, label, anchor_text=text))
+            links.append(_DiscoveredLink(url, label, anchor_text=text,
+                                         is_word_hyperlink=True))
             linked_urls.add(url)
 
-        # DOCX can also contain old-style HYPERLINK field instructions or plain
-        # HTTP URLs (including the paragraph immediately after an Image 7 tag).
+        # Word has two additional ways to represent hyperlinks: w:fldSimple
+        # with a w:instr attribute, and w:instrText complex field codes.  The
+        # previous scanner missed the former completely.
+        for field in paragraph.iter(_qn(W_NS, "fldSimple")):
+            instruction = field.get(_qn(W_NS, "instr"), "")
+            for found in URL_RE.findall(instruction):
+                url = _clean_url(found)
+                if url in linked_urls:
+                    continue
+                label = _normalise_link_text("".join(
+                    node.text or "" for node in field.iter(_qn(W_NS, "t"))
+                )) or text
+                links.append(_DiscoveredLink(url, label, anchor_text=text,
+                                             is_word_hyperlink=True))
+                linked_urls.add(url)
         for field in paragraph.iter(_qn(W_NS, "instrText")):
-            for url in URL_RE.findall(field.text or ""):
-                cleaned = _clean_url(url)
-                if cleaned not in linked_urls:
-                    links.append(_DiscoveredLink(cleaned, text, anchor_text=text))
-                    linked_urls.add(cleaned)
-        for url in URL_RE.findall(text):
-            cleaned = _clean_url(url)
-            if cleaned not in linked_urls:
-                links.append(_DiscoveredLink(cleaned, text))
-                linked_urls.add(cleaned)
+            for found in URL_RE.findall(field.text or ""):
+                url = _clean_url(found)
+                if url not in linked_urls:
+                    links.append(_DiscoveredLink(url, text, anchor_text=text,
+                                                 is_word_hyperlink=True))
+                    linked_urls.add(url)
 
-        # Explicit number belongs to a specific hyperlink if its own label is
-        # 'Image 3', not to an unrelated link earlier in the same paragraph.
+        for found in URL_RE.findall(text):
+            url = _clean_url(found)
+            if url not in linked_urls:
+                links.append(_DiscoveredLink(url, text, anchor_text=text))
+                linked_urls.add(url)
+
         for link in links:
             link.number = extract_placeholder_number(link.label)
         if len(links) == 1 and links[0].number is None:
@@ -269,17 +301,30 @@ def scan_linked_image_sources(
                 links[0].number = pending_number
 
         for link in links:
-            if link.number is None and not _looks_like_image_link(link.url, link.label):
+            if urlparse(link.url).scheme.lower() not in {"http", "https"}:
                 continue
+            # *Never* require a particular display label when Word itself
+            # supplies a hyperlink.  HTTP downloads are accepted only after
+            # raster verification, and HTML previews require an image cue.
+            image_hint = (link.number is not None or
+                          _looks_like_image_link(link.url, link.label))
+            if not image_hint and not link.is_word_hyperlink:
+                continue
+            link.allow_page_preview = image_hint
             if link.number is not None:
-                existing = used_explicit.get(link.number)
-                if existing:
-                    if existing != link.url:
+                existing_url = used_explicit.get(link.number)
+                if existing_url is not None:
+                    # A chapter can restart image numbering or repeat Image 01.
+                    # Each hyperlink needs its own anchor, not the first link's
+                    # picture, so assign a new internal ID below.
+                    if existing_url != link.url:
                         warnings.append(
-                            f"Image {link.number} has more than one linked URL; the first detected link is used."
+                            f"The label Image {link.number} is reused for different URLs; "
+                            "each link will be inserted at its own location."
                         )
-                    continue
-                used_explicit[link.number] = link.url
+                    link.number = None
+                else:
+                    used_explicit[link.number] = link.url
             discovered.append(link)
 
         if links:
@@ -303,12 +348,13 @@ def scan_linked_image_sources(
             numbered = True
         results.append(LinkedImageSource(
             number, link.url, _source_type(link.url), link.label[:200],
-            numbered, link.anchor_text[:1000],
+            numbered, link.anchor_text[:1000], link.allow_page_preview,
         ))
         if len(results) >= MAX_LINKED_IMAGES:
-            warnings.append(f"Only the first {MAX_LINKED_IMAGES} image links are processed per document.")
+            warnings.append(
+                f"Only the first {MAX_LINKED_IMAGES} external/image links are inspected per document."
+            )
             break
-
     return results, warnings
 
 
@@ -646,14 +692,22 @@ class _PageImageParser(HTMLParser):
                 self.urls.append(values["href"])
 
 
-def _download_image_link(url: str) -> bytes:
-    """Download a public raster link, or its advertised image on a photo page."""
+def _download_image_link(url: str, *, allow_page_preview: bool = True) -> bytes:
+    """Download verified raster data, optionally an image-page preview.
+
+    Ordinary website hyperlinks can point to real images at extensionless
+    endpoints; verify their response body, but never use unrelated web-page
+    og:image thumbnails as teaching photos.
+    """
     payload = _download_public_url(url)
     try:
         _verify_image(payload)
         return payload
     except ValueError:
         pass
+
+    if not allow_page_preview:
+        raise ValueError("The hyperlink points to a webpage, not downloadable image data.")
 
     # A stock-photo landing page frequently returns HTML rather than an image.
     # Only image links identified by our scanner arrive here; arbitrary website
@@ -716,10 +770,17 @@ def download_linked_images(
             if source.url in cache:
                 payload = cache[source.url]
             elif source.source_type in {"freepik", "magnific"}:
+                if not source.allow_page_preview:
+                    # A generic provider homepage/about link is not a stock
+                    # resource; never waste licensed API calls on it.
+                    raise ValueError("This is not an identifiable stock-image resource link.")
                 payload = _download_stock_resource(source.url)
                 cache[source.url] = payload
             else:
-                payload = _download_image_link(source.url)
+                if source.allow_page_preview:
+                    payload = _download_image_link(source.url)
+                else:
+                    payload = _download_image_link(source.url, allow_page_preview=False)
                 cache[source.url] = payload
             result.items.append((f"Image {source.number}.jpg", payload))
             result.entries.append(LinkEntry(
@@ -728,8 +789,11 @@ def download_linked_images(
                 anchor_text=source.anchor_text,
             ))
         except Exception as exc:
+            # An opaque ordinary hyperlink that does not return actual image
+            # bytes is not a failed *image*: it should remain an ordinary link.
+            status = "failed" if source.allow_page_preview else "skipped"
             result.entries.append(LinkEntry(
-                source.number, source.url, source.source_type, "failed", str(exc),
+                source.number, source.url, source.source_type, status, str(exc),
                 source.label, source.numbered, source.anchor_text,
             ))
 

@@ -61,7 +61,15 @@ class AnyNameImageLinkTests(unittest.TestCase):
         add_link(doc.add_paragraph("Example source: "), "Image 42", "https://site.example/photo.jpg")
         add_link(doc.add_paragraph(), "Photo of a team", "https://site.example/photo.jpg")
         sources, _ = scan_linked_image_sources(save(doc))
-        self.assertEqual([], sources)
+        # All genuine Word hyperlinks are candidates now, regardless of label;
+        # exclusion still applies to the References section.  Non-image HTML
+        # responses are safely ignored rather than embedding social thumbnails.
+        self.assertEqual(["Official guidance", "Blog post"], [src.label for src in sources])
+        html = b'<html><meta property="og:image" content="https://example.com/logo.jpg"></html>'
+        with patch("app.services.linked_images._download_public_url", return_value=html):
+            result = download_linked_images(save(doc))
+        self.assertEqual(0, result.to_dict()["downloaded"])
+        self.assertEqual(2, result.to_dict()["skipped"])
 
     def test_freepik_cdn_image_is_downloaded_as_direct_photo(self):
         doc = Document()

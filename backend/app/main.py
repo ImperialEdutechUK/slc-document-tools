@@ -42,17 +42,18 @@ from .formatter.simple_editing import (
     replace_paragraph_text,
 )
 from .models import Job
-from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest
+from .schemas import CleanSpacingRequest, FooterEditRequest, JobResponse, SimpleEditRequest, TextEditRequest, ConfirmCourseImagePreviewRequest
 from .services.libreoffice_fields import LibreOfficeFieldError, update_docx_fields
 from .services.linked_images import LinkedImageResult, download_linked_images
 from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, StorageNotFoundError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
 from .services.course_images import CourseImagesError, build_course_image_package
+from .services.course_image_review import make_image_preview, finish_image_preview, preview_jpeg
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v23-stable-image-bookmarks"
+BUILD_VERSION = "2026.11.03-v25-name-independent-image-links"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -110,7 +111,7 @@ def _job_response(job: Job, include_report: bool = True) -> JobResponse:
         status=job.status,
         original_filename=job.original_filename,
         output_filename=job.output_filename,
-        download_url=f"{API_PREFIX}/jobs/{job.id}/download" if job.output_key else None,
+        download_url=f"{API_PREFIX}/jobs/{job.id}/download" if job.output_key and job.job_type != "course_images_preview" else None,
         report_url=f"{API_PREFIX}/jobs/{job.id}/report" if job.report_key else None,
         report=report,
         details=details,
@@ -171,6 +172,7 @@ def _linked_report_text(link_result: LinkedImageResult) -> str:
             "downloaded": "OK",
             "failed": "FAILED",
             "manual_override": "MANUAL OVERRIDE",
+            "skipped": "NOT AN IMAGE",
         }.get(entry.status, entry.status.upper())
         display = f"Image {entry.number}" if entry.numbered else f"Linked image {entry.number} ({entry.label or 'unnamed link'})"
         line = f"{display}: {label} - {entry.source_type} - {entry.url}"
@@ -351,13 +353,104 @@ async def format_document_batch(
         raise HTTPException(status_code=500, detail="Batch formatting failed.") from exc
 
 
+@app.post(f"{API_PREFIX}/course-images/review", response_model=JobResponse)
+async def review_course_images(
+    document: Annotated[UploadFile, File(...)],
+    course_name: Annotated[str, Form()] = "",
+    image_source: Annotated[str, Form()] = "mixed",
+    reuse_existing: Annotated[bool, Form()] = True,
+    use_openrouter: Annotated[bool, Form()] = False,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    """Find stock photos once; retain private preview bundle for later confirmation."""
+    filename = document.filename or "course.docx"
+    if Path(filename).suffix.lower() not in {".docx", ".zip"}:
+        raise HTTPException(status_code=400, detail="Upload a DOCX or a ZIP of DOCX chapters.")
+    if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik"}:
+        raise HTTPException(status_code=400, detail="Invalid stock source.")
+    job = _new_job(db, "course_images_preview", filename)
+    try:
+        raw = await document.read()
+        if len(raw) > 90 * 1024 * 1024:
+            raise CourseImagesError("Upload exceeds the 90 MB limit.")
+        result = await run_in_threadpool(
+            make_image_preview, raw, filename, course_name=course_name,
+            image_source=image_source, reuse_existing=reuse_existing,
+            use_openrouter=use_openrouter,
+        )
+        details = result.details
+        details["build"] = BUILD_VERSION
+        details["previews"] = [
+            {**item, "preview_url": f"{API_PREFIX}/course-images/reviews/{job.id}/images/{item['id']}"}
+            for item in details["previews"]
+        ]
+        key = f"jobs/{job.id}/private_image_review.zip"
+        storage.put_bytes(key, result.payload, "application/zip")
+        _complete_job(db, job, output_filename="private_image_review.zip", output_key=key, details=details)
+        output = _job_response(job)
+        # Preview bundles contain original DOCX data and are never public downloads.
+        output.download_url = None
+        output.output_filename = None
+        output.status = "review_ready"
+        return output
+    except (CourseImagesError, StorageError) as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422 if isinstance(exc, CourseImagesError) else 503, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, job, exc)
+        logger.exception("Course image preview failed")
+        raise HTTPException(status_code=500, detail="Unable to prepare image previews.") from exc
+
+
+@app.get(f"{API_PREFIX}/course-images/reviews/{{job_id}}/images/{{image_id}}")
+def get_course_image_preview(job_id: str, image_id: int, db: Session = Depends(get_db)) -> Response:
+    job = db.get(Job, job_id)
+    if not job or job.job_type != "course_images_preview" or job.status != "completed" or not job.output_key:
+        raise HTTPException(status_code=404, detail="Preview job not found.")
+    try:
+        data = preview_jpeg(storage.get_bytes(job.output_key), image_id)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=1800", "X-Content-Type-Options": "nosniff"})
+    except StorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except CourseImagesError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post(f"{API_PREFIX}/course-images/reviews/{{job_id}}/confirm", response_model=JobResponse)
+async def confirm_course_image_preview(
+    job_id: str, request: ConfirmCourseImagePreviewRequest,
+    db: Session = Depends(get_db),
+) -> JobResponse:
+    preview = db.get(Job, job_id)
+    if not preview or preview.job_type != "course_images_preview" or preview.status != "completed" or not preview.output_key:
+        raise HTTPException(status_code=404, detail="Preview job not found. Prepare a new review.")
+    job = _new_job(db, "course_images_insert", preview.original_filename)
+    try:
+        raw = storage.get_bytes(preview.output_key)
+        result = await run_in_threadpool(finish_image_preview, raw, request.selected_ids)
+        result.details["build"] = BUILD_VERSION
+        key = f"jobs/{job.id}/{result.filename}"
+        media_type = "application/zip" if result.filename.endswith(".zip") else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        storage.put_bytes(key, result.payload, media_type)
+        _complete_job(db, job, output_filename=result.filename, output_key=key, details=result.details)
+        return _job_response(job)
+    except (CourseImagesError, StorageError) as exc:
+        _fail_job(db, job, exc)
+        raise HTTPException(status_code=422 if isinstance(exc, CourseImagesError) else 503, detail=str(exc)) from exc
+    except Exception as exc:
+        _fail_job(db, job, exc)
+        logger.exception("Course image confirmation failed")
+        raise HTTPException(status_code=500, detail="Unable to insert the reviewed images.") from exc
+
+
 @app.post(f"{API_PREFIX}/course-images/prepare", response_model=JobResponse)
 async def prepare_course_images(
     document: Annotated[UploadFile, File(...)],
     course_name: Annotated[str, Form()] = "",
     mode: Annotated[str, Form()] = "guides",
     generate_missing: Annotated[bool, Form()] = False,
-    image_source: Annotated[str, Form()] = "auto",
+    image_source: Annotated[str, Form()] = "mixed",
+    reuse_existing: Annotated[bool, Form()] = True,
     use_openrouter: Annotated[bool, Form()] = False,
     cover_image: Annotated[UploadFile | None, File()] = None,
     db: Session = Depends(get_db),
@@ -368,7 +461,7 @@ async def prepare_course_images(
         raise HTTPException(status_code=400, detail="Upload one DOCX or a ZIP of chapters.")
     if mode not in {"guides", "insert"}:
         raise HTTPException(status_code=400, detail="Invalid image workflow mode.")
-    if image_source not in {"auto", "pexels", "freepik", "generate"}:
+    if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik", "generate"}:
         raise HTTPException(status_code=400, detail="Invalid image source selection.")
     if image_source == "generate":
         raise HTTPException(status_code=400, detail="AI image generation is disabled. Choose a stock image source.")
@@ -387,6 +480,7 @@ async def prepare_course_images(
             generate_missing=generate_missing,
             cover_upload=cover_bytes,
             image_source=image_source,
+            reuse_existing=reuse_existing,
             use_openrouter=use_openrouter,
         )
         result.details["build"] = BUILD_VERSION
@@ -1174,7 +1268,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}/download")
 def download_job(job_id: str, db: Session = Depends(get_db)) -> Response:
     job = db.get(Job, job_id)
-    if not job or not job.output_key or not job.output_filename:
+    if not job or not job.output_key or not job.output_filename or job.job_type == "course_images_preview":
         raise HTTPException(status_code=404, detail="Output file not found.")
     try:
         payload = storage.get_bytes(job.output_key)

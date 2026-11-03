@@ -747,24 +747,15 @@ def insert_numbered_images(
         used_source_files.add(image.source_name)
         return True
 
-    # An image placeholder may be a standalone Word hyperlink or an IMAGE5
-    # hyperlink inside a longer paragraph. Preserve all other body text.
+    # Insert *actual linked images* first.  The old implementation matched a
+    # visible IMAGE number before looking at the link target.  Reused "Image
+    # 01" labels therefore could resolve to the wrong photograph, and renamed
+    # or opaque links had no position at all.  Bookmarks were stamped on the
+    # original source paragraph before cover/TOC processing; use them now.
     parent_by_child = {child: parent for parent in root.iter() for child in parent}
-    for paragraph in paragraphs:
-        exact_number = extract_placeholder_number(paragraph_text(paragraph))
-        number = exact_number if exact_number is not None else _hyperlink_placeholder_number(paragraph)
-        if number is None:
-            continue
-        report.total_placeholders += 1
-        placeholder_counts[number] += 1
-        place_image(paragraph, number, replace_label=exact_number is not None)
-
-    # Final fallback: a genuine downloaded image URL was located, but the text
-    # around it was not a standalone placeholder (e.g. label + visible URL,
-    # or an unusual Word hyperlink). Anchor the photograph to that URL instead
-    # of silently dropping it. Do not remove surrounding text or headings.
+    linked_placed_paragraphs: set[ET.Element] = set()
     for number, url in (linked_image_urls or {}).items():
-        if number in used_numbers or number not in catalog.selected:
+        if number not in catalog.selected:
             continue
         marker = (linked_image_bookmarks or {}).get(number)
         anchor = _bookmark_anchor_paragraph(paragraphs, marker) if marker else None
@@ -774,11 +765,9 @@ def insert_numbered_images(
                 occurrence=linked_anchor_occurrences[url],
             )
         if anchor is None:
-            # Word may store the original link as a field code, or a format
-            # conversion may remove its relationship while retaining its
-            # visible caption. Locate that *same original paragraph text*
-            # rather than silently dropping the downloaded photo. Do not
-            # guess a position from a generic word like "Photo".
+            # A small number of DOCX editors turn external links into complex
+            # field codes during page rewriting.  Only match the *complete*
+            # original paragraph, never a generic word such as "Photo".
             original = _clean_placeholder_text(
                 (linked_image_anchor_texts or {}).get(number, "")
             )
@@ -787,9 +776,6 @@ def insert_numbered_images(
                     paragraph for paragraph in paragraphs
                     if _clean_placeholder_text(paragraph_text(paragraph)) == original
                 ]
-                # Repeated identical paragraphs are resolved in source order.
-                # When there is only one paragraph with multiple image links,
-                # multiple photographs are placed below the same paragraph.
                 if len(candidates) == 1:
                     anchor = candidates[0]
                 elif candidates:
@@ -799,10 +785,37 @@ def insert_numbered_images(
                         fingerprint_occurrences[original] += 1
         if anchor is None:
             continue
+
+        text_before = paragraph_text(anchor)
+        # A lone "Image 01" link is an image placeholder, not lesson prose.
+        # Replace it, as the user expects.  If the link is embedded in text,
+        # preserve the text and insert a new photo paragraph underneath.
+        # A linked heading is never rewritten as an image.
+        ppr = anchor.find(_qn(W_NS, "pPr"))
+        style = ppr.find(_qn(W_NS, "pStyle")) if ppr is not None else None
+        style_value = (style.get(_qn(W_NS, "val"), "") if style is not None else "").lower()
+        is_heading = "heading" in style_value or style_value in {"title", "subtitle", "style1"}
+        replace_marker = extract_placeholder_number(text_before) is not None and not is_heading
+
         report.total_placeholders += 1
         placeholder_counts[number] += 1
-        if place_image(anchor, number, replace_label=False):
+        if place_image(anchor, number, replace_label=replace_marker):
             linked_anchor_occurrences[url] += 1
+            linked_placed_paragraphs.add(anchor)
+
+    # Place *unlinked*, manually provided IMAGE-number files afterwards.  An
+    # already-processed source paragraph cannot be matched a second time by
+    # its Image 01 label, even if other images in the document use that label.
+    for paragraph in paragraphs:
+        if paragraph in linked_placed_paragraphs:
+            continue
+        exact_number = extract_placeholder_number(paragraph_text(paragraph))
+        number = exact_number if exact_number is not None else _hyperlink_placeholder_number(paragraph)
+        if number is None:
+            continue
+        report.total_placeholders += 1
+        placeholder_counts[number] += 1
+        place_image(paragraph, number, replace_label=exact_number is not None)
 
     report.placeholder_counts = dict(sorted(placeholder_counts.items()))
     report.missing_numbers = sorted(
