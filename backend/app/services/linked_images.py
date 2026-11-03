@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
+from html.parser import HTMLParser
 import ipaddress
 import json
 import os
@@ -10,14 +11,14 @@ import re
 from difflib import SequenceMatcher
 import socket
 from typing import Iterable
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import xml.etree.ElementTree as ET
 import zipfile
 
 import httpx
 from PIL import UnidentifiedImageError
 
-from ..formatter.image_placement import prepare_image_catalog
+from ..formatter.image_placement import extract_placeholder_number, prepare_image_catalog
 from ..formatter.safe_images import open_checked_image
 from .freepik_account import account_fallback_configured, download_with_accounts
 
@@ -36,6 +37,30 @@ RESOURCE_ID_PATTERNS = [
     re.compile(r"/(?:resource|photo|vector|psd)/(\d+)(?:[/?#]|$)", re.IGNORECASE),
 ]
 MAX_IMAGE_BYTES = int(os.getenv("MAX_REMOTE_IMAGE_BYTES", str(25 * 1024 * 1024)))
+MAX_LINKED_IMAGES = int(os.getenv("MAX_LINKED_IMAGES_PER_DOCUMENT", "100"))
+
+IMAGE_FILE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_LABEL_RE = re.compile(
+    r"\b(?:images?|photos?|photographs?|pictures?|illustrations?|"
+    r"graphics?|visuals?|diagrams?|screenshots?|infographics?|artwork)\b",
+    re.IGNORECASE,
+)
+IMAGE_PAGE_SEGMENTS = {
+    "photo", "photos", "free-photo", "image", "images", "image-photo",
+    "stock-photo", "photography", "picture", "pictures", "illustration",
+    "illustrations", "vector", "free-vector", "vectors",
+}
+# Recognise image-specific *destinations*, not all links on these websites.
+IMAGE_PAGE_HOSTS = (
+    "pexels.com", "unsplash.com", "pixabay.com", "shutterstock.com",
+    "istockphoto.com", "gettyimages.com", "stock.adobe.com", "flickr.com",
+)
+EXCLUDED_SECTION_RE = re.compile(
+    r"^(?:references?|reference list|bibliography|works cited|further reading|"
+    r"summary|table of contents|contents)$",
+    re.IGNORECASE,
+)
+
 
 
 @dataclass
@@ -43,6 +68,9 @@ class LinkedImageSource:
     number: int
     url: str
     source_type: str
+    label: str = ""
+    numbered: bool = True
+    anchor_text: str = ""
 
 
 @dataclass
@@ -52,6 +80,9 @@ class LinkEntry:
     source_type: str
     status: str
     message: str = ""
+    label: str = ""
+    numbered: bool = True
+    anchor_text: str = ""
 
 
 @dataclass
@@ -79,14 +110,78 @@ def _clean_url(url: str) -> str:
 
 
 def _source_type(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
+    parsed = urlparse(url)
+    # Stock-provider image CDN URLs are already raster files; do not send them
+    # to the provider's resource-ID API (which expects a /free-photo/... page).
+    if Path(unquote(parsed.path).lower()).suffix in IMAGE_FILE_EXTENSIONS:
+        return "direct"
+    host = (parsed.hostname or "").lower()
     for source_type, pattern in STOCK_HOST_PATTERNS.items():
         if pattern.search(host):
             return source_type
     return "direct"
 
 
-def scan_linked_image_sources(docx_bytes: bytes) -> tuple[list[LinkedImageSource], list[str]]:
+def _normalise_link_text(value: str) -> str:
+    return " ".join(re.sub(r"[\u00ad\u200b-\u200f\u2060\ufeff]", "", value).split())
+
+
+def _looks_like_image_link(url: str, label: str) -> bool:
+    """Identify image links without requiring IMAGE1 / IMAGE2 display text.
+
+    Ordinary reference/website hyperlinks must not turn into photographs simply
+    because the linked webpage advertises a social-media preview image.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    path = unquote(parsed.path).lower()
+    if Path(path).suffix in IMAGE_FILE_EXTENSIONS:
+        return True
+    query = parse_qs(parsed.query.lower())
+    if any(
+        Path(value).suffix in IMAGE_FILE_EXTENSIONS
+        for key in ("file", "filename", "image", "src", "url")
+        for value in query.get(key, [])
+    ) or any(value in {"jpg", "jpeg", "png", "webp"}
+             for key in ("format", "fm", "extension") for value in query.get(key, [])):
+        return True
+    host = parsed.hostname.lower()
+    if host.startswith(("images.", "img.", "photos.")) and path not in {"", "/"}:
+        return True
+    if _source_type(url) in {"magnific", "freepik"}:
+        return bool(path and path != "/")
+    segments = {segment for segment in path.split("/") if segment}
+    if any(host == domain or host.endswith("." + domain) for domain in IMAGE_PAGE_HOSTS):
+        if IMAGE_PAGE_SEGMENTS & segments:
+            return True
+    # An image-specific URL on another site is still supported regardless of
+    # the hyperlink label, e.g. 'Click here' -> /photos/workplace-safety.
+    if IMAGE_PAGE_SEGMENTS & segments:
+        return True
+    # Explicitly labelled image links may point to image pages with opaque URLs.
+    return bool(IMAGE_LABEL_RE.search(_normalise_link_text(label)))
+
+
+@dataclass
+class _DiscoveredLink:
+    url: str
+    label: str
+    number: int | None = None
+    anchor_text: str = ""
+
+
+def scan_linked_image_sources(
+    docx_bytes: bytes, *, occupied_numbers: Iterable[int] = (),
+) -> tuple[list[LinkedImageSource], list[str]]:
+    """Scan actual Word hyperlinks and direct URLs, preserving their document order.
+
+    Numbered placeholders retain their original numbers. Other genuine image
+    links receive non-conflicting internal numbers for the existing DOCX image
+    catalog; users do not need to rename or number any hyperlink.
+    """
     warnings: list[str] = []
     try:
         with zipfile.ZipFile(BytesIO(docx_bytes)) as archive:
@@ -101,54 +196,120 @@ def scan_linked_image_sources(docx_bytes: bytes) -> tuple[list[LinkedImageSource
         rel.get("Id"): rel.get("Target")
         for rel in rels_root
         if rel.get("TargetMode") == "External" and rel.get("Target")
+        and (rel.get("Type") or "").endswith("/hyperlink")
     }
 
-    found: dict[int, LinkedImageSource] = {}
+    discovered: list[_DiscoveredLink] = []
+    used_explicit: dict[int, str] = {}
     pending_number: int | None = None
+    in_excluded_section = False
+    occupied = set(occupied_numbers)
+    max_document_number = max(occupied, default=0)
 
     for paragraph in root.iter(_qn(W_NS, "p")):
-        text = " ".join("".join(node.text or "" for node in paragraph.iter(_qn(W_NS, "t"))).split())
-        # Word can insert invisible characters into underlined IMAGE5 labels.
-        # Remove those only for matching; the source DOCX is never changed.
-        text = re.sub(r"[\u00ad\u200b-\u200f\u2060\ufeff]", "", text)
-        urls: list[str] = []
+        text = _normalise_link_text("".join(node.text or "" for node in paragraph.iter(_qn(W_NS, "t"))))
+        style = paragraph.find(f"{_qn(W_NS, 'pPr')}/{_qn(W_NS, 'pStyle')}")
+        style_name = (style.get(_qn(W_NS, "val"), "") if style is not None else "").lower()
+        is_heading = "heading" in style_name or style_name in {"title", "subtitle"}
+        # Some Word imports omit heading styles. A standalone References,
+        # Summary or Table of Contents paragraph is still a section boundary.
+        if EXCLUDED_SECTION_RE.fullmatch(text):
+            in_excluded_section = True
+        elif is_heading and text:
+            in_excluded_section = False
 
-        for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink")):
-            rel_id = hyperlink.get(_qn(R_NS, "id"))
-            if rel_id and relationships.get(rel_id):
-                urls.append(relationships[rel_id])
+        matches = list(IMAGE_NUMBER_RE.finditer(text))
+        for match in matches:
+            max_document_number = max(max_document_number, int(match.group("number")))
+        current_number = int(matches[0].group("number")) if matches else None
 
-        for field in paragraph.iter(_qn(W_NS, "instrText")):
-            if field.text:
-                urls.extend(URL_RE.findall(field.text))
-        urls.extend(URL_RE.findall(text))
-        urls = list(dict.fromkeys(_clean_url(url) for url in urls))
-
-        match = IMAGE_NUMBER_RE.search(text)
-        current_number = int(match.group("number")) if match else None
-        number_for_urls = current_number or pending_number
-
-        if urls and number_for_urls is not None:
-            chosen = urls[0]
-            if number_for_urls in found and found[number_for_urls].url != chosen:
-                warnings.append(
-                    f"Image {number_for_urls} has more than one linked URL; the first detected link is used."
-                )
-            else:
-                found[number_for_urls] = LinkedImageSource(
-                    number=number_for_urls,
-                    url=chosen,
-                    source_type=_source_type(chosen),
-                )
+        if in_excluded_section:
             pending_number = None
             continue
 
-        if current_number is not None and not urls:
+        links: list[_DiscoveredLink] = []
+        linked_urls: set[str] = set()
+        for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink")):
+            rel_id = hyperlink.get(_qn(R_NS, "id"))
+            url = relationships.get(rel_id)
+            if not url:
+                continue
+            url = _clean_url(url)
+            label = _normalise_link_text("".join(
+                node.text or "" for node in hyperlink.iter(_qn(W_NS, "t"))
+            ))
+            links.append(_DiscoveredLink(url, label, anchor_text=text))
+            linked_urls.add(url)
+
+        # DOCX can also contain old-style HYPERLINK field instructions or plain
+        # HTTP URLs (including the paragraph immediately after an Image 7 tag).
+        for field in paragraph.iter(_qn(W_NS, "instrText")):
+            for url in URL_RE.findall(field.text or ""):
+                cleaned = _clean_url(url)
+                if cleaned not in linked_urls:
+                    links.append(_DiscoveredLink(cleaned, text, anchor_text=text))
+                    linked_urls.add(cleaned)
+        for url in URL_RE.findall(text):
+            cleaned = _clean_url(url)
+            if cleaned not in linked_urls:
+                links.append(_DiscoveredLink(cleaned, text))
+                linked_urls.add(cleaned)
+
+        # Explicit number belongs to a specific hyperlink if its own label is
+        # 'Image 3', not to an unrelated link earlier in the same paragraph.
+        for link in links:
+            link.number = extract_placeholder_number(link.label)
+        if len(links) == 1 and links[0].number is None:
+            if current_number is not None and (
+                re.match(r"^\s*image\s*[-:#]?\s*\d+\b", text, re.IGNORECASE)
+                or extract_placeholder_number(text) is not None
+            ):
+                links[0].number = current_number
+            elif pending_number is not None:
+                links[0].number = pending_number
+
+        for link in links:
+            if link.number is None and not _looks_like_image_link(link.url, link.label):
+                continue
+            if link.number is not None:
+                existing = used_explicit.get(link.number)
+                if existing:
+                    if existing != link.url:
+                        warnings.append(
+                            f"Image {link.number} has more than one linked URL; the first detected link is used."
+                        )
+                    continue
+                used_explicit[link.number] = link.url
+            discovered.append(link)
+
+        if links:
+            pending_number = None
+        elif current_number is not None and extract_placeholder_number(text) is not None:
             pending_number = current_number
         elif text:
             pending_number = None
 
-    return [found[number] for number in sorted(found)], warnings
+    next_number = max([max_document_number, *used_explicit.keys()]) + 1
+    results: list[LinkedImageSource] = []
+    for link in discovered:
+        if link.number is None:
+            while next_number in occupied or next_number in used_explicit:
+                next_number += 1
+            number = next_number
+            next_number += 1
+            numbered = False
+        else:
+            number = link.number
+            numbered = True
+        results.append(LinkedImageSource(
+            number, link.url, _source_type(link.url), link.label[:200],
+            numbered, link.anchor_text[:1000],
+        ))
+        if len(results) >= MAX_LINKED_IMAGES:
+            warnings.append(f"Only the first {MAX_LINKED_IMAGES} image links are processed per document.")
+            break
+
+    return results, warnings
 
 
 def _extract_resource_id(url: str) -> int | None:
@@ -466,6 +627,57 @@ def _download_stock_resource(url: str) -> bytes:
     raise ValueError(f"The stock image could not be downloaded ({detail}).")
 
 
+class _PageImageParser(HTMLParser):
+    """Extract a webpage's explicitly advertised photo, not arbitrary <img> tags."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.urls: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): (value or "") for key, value in attrs}
+        if tag == "meta":
+            name = (values.get("property") or values.get("name") or values.get("itemprop") or "").lower()
+            if name in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "image"}:
+                if values.get("content"):
+                    self.urls.append(values["content"])
+        elif tag == "link" and "image_src" in values.get("rel", "").lower():
+            if values.get("href"):
+                self.urls.append(values["href"])
+
+
+def _download_image_link(url: str) -> bytes:
+    """Download a public raster link, or its advertised image on a photo page."""
+    payload = _download_public_url(url)
+    try:
+        _verify_image(payload)
+        return payload
+    except ValueError:
+        pass
+
+    # A stock-photo landing page frequently returns HTML rather than an image.
+    # Only image links identified by our scanner arrive here; arbitrary website
+    # hyperlinks are never scraped for attractive but irrelevant social previews.
+    sample = payload[:1024].lstrip().lower()
+    if b"<html" not in sample and b"<!doctype html" not in sample:
+        raise ValueError("The link did not return a supported raster image.")
+    parser = _PageImageParser()
+    parser.feed(payload[:2_000_000].decode("utf-8", errors="replace"))
+    errors: list[str] = []
+    for candidate in dict.fromkeys(parser.urls[:8]):
+        resolved = urljoin(url, candidate)
+        try:
+            image_bytes = _download_public_url(resolved)
+            _verify_image(image_bytes)
+            return image_bytes
+        except Exception as exc:
+            errors.append(str(exc))
+    raise ValueError(
+        "The photo page does not expose a downloadable JPG, PNG or WebP image."
+        + (f" First error: {errors[0]}" if errors else "")
+    )
+
+
 def _verify_image(payload: bytes) -> None:
     try:
         with open_checked_image(payload) as image:
@@ -487,25 +699,38 @@ def download_linked_images(
     manual_items: list[tuple[str, bytes]] | None = None,
 ) -> LinkedImageResult:
     result = LinkedImageResult()
-    sources, warnings = scan_linked_image_sources(docx_bytes)
-    result.warnings.extend(warnings)
     manual_numbers = manual_image_numbers(manual_items or [])
+    sources, warnings = scan_linked_image_sources(docx_bytes, occupied_numbers=manual_numbers)
+    result.warnings.extend(warnings)
+    cache: dict[str, bytes] = {}
 
     for source in sources:
         if source.number in manual_numbers:
-            result.entries.append(
-                LinkEntry(source.number, source.url, source.source_type, "manual_override", "Manual upload takes priority.")
-            )
+            result.entries.append(LinkEntry(
+                source.number, source.url, source.source_type, "manual_override",
+                "Manual upload takes priority.", source.label, source.numbered,
+                source.anchor_text,
+            ))
             continue
         try:
-            if source.source_type in {"freepik", "magnific"}:
+            if source.url in cache:
+                payload = cache[source.url]
+            elif source.source_type in {"freepik", "magnific"}:
                 payload = _download_stock_resource(source.url)
+                cache[source.url] = payload
             else:
-                payload = _download_public_url(source.url)
-                _verify_image(payload)
+                payload = _download_image_link(source.url)
+                cache[source.url] = payload
             result.items.append((f"Image {source.number}.jpg", payload))
-            result.entries.append(LinkEntry(source.number, source.url, source.source_type, "downloaded"))
+            result.entries.append(LinkEntry(
+                source.number, source.url, source.source_type, "downloaded",
+                label=source.label, numbered=source.numbered,
+                anchor_text=source.anchor_text,
+            ))
         except Exception as exc:
-            result.entries.append(LinkEntry(source.number, source.url, source.source_type, "failed", str(exc)))
+            result.entries.append(LinkEntry(
+                source.number, source.url, source.source_type, "failed", str(exc),
+                source.label, source.numbered, source.anchor_text,
+            ))
 
     return result

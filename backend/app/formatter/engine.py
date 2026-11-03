@@ -849,6 +849,40 @@ def _paragraph_is_toc_heading(para):
     return style_val == "TOCHeading" or txt.strip().lower() == "table of contents"
 
 
+def _source_content_start(elements):
+    """Find genuine unit material before a cover/TOC boundary.
+
+    Some uploaded units use an explicit page break after their *content*, or
+    place their TOC after introductory teaching text. Deleting everything
+    before the boundary silently removes linked-image anchors. Only title-only
+    or artwork-only front matter can be safely discarded.
+    """
+    for item_index, element in enumerate(elements):
+        if element.tag != wt("p"):
+            continue
+        text = para_text(element)
+        if not text:
+            continue
+        ppr = element.find(wt("pPr"))
+        ps = ppr.find(wt("pStyle")) if ppr is not None else None
+        style = (ps.get(wt("val"), "") if ps is not None else "").lower()
+        # Strong indications of content: academic headings, numbered
+        # subsections, teaching paragraphs or actual IMAGE markers.
+        if (style.startswith("heading") or style in {"style1", "heading1", "heading2", "heading3"}
+                or re.match(r"^(?:chapter|unit|lesson|module|section)\s*\d+\b", text, re.I)
+                or re.match(r"^\d+(?:\.\d+){1,3}\s+\S", text)
+                or (len(text.split()) >= 25 and re.search(r"[.!?]", text))
+                or re.search(r"\bimage\s*[-:#]?\s*\d+\b", text, re.I)):
+            return item_index
+    # Multiple linked photographs on a single page are also substantive
+    # content, not an ordinary course cover.
+    linked_paragraphs = [i for i, el in enumerate(elements)
+                         if el.tag == wt("p") and el.find(".//" + wt("hyperlink")) is not None]
+    if len(linked_paragraphs) >= 2:
+        return linked_paragraphs[0]
+    return None
+
+
 def strip_uploaded_front_matter(out_body):
     """Remove the uploaded document's own cover/title block when it has no
     explicit page or section break to mark where it ends.
@@ -895,6 +929,12 @@ def strip_uploaded_front_matter(out_body):
 
     if not found_toc:
         return 0
+
+    content_start = _source_content_start(to_remove)
+    if content_start is not None:
+        # Keep the actual chapter and its link positions; remove only any
+        # leading title/cover elements before the first content paragraph.
+        to_remove = to_remove[:content_start]
 
     for elem in to_remove:
         out_body.remove(elem)
@@ -945,6 +985,10 @@ def strip_uploaded_first_page(out_body):
     if not found_break:
         return 0
 
+    content_start = _source_content_start(to_remove)
+    if content_start is not None:
+        to_remove = to_remove[:content_start]
+
     for para in to_remove:
         out_body.remove(para)
 
@@ -961,6 +1005,7 @@ def process(
     numbered_image_items=None,
     *,
     linked_image_urls=None,
+    linked_image_anchor_texts=None,
 ):
     template_bytes = get_template_bytes()
     image_catalog = prepare_image_catalog(numbered_image_items or [])
@@ -1100,6 +1145,7 @@ def process(
             media_out,
             image_catalog,
             linked_image_urls=linked_image_urls,
+            linked_image_anchor_texts=linked_image_anchor_texts,
         )
         validation_text = build_validation_report(image_catalog, placement_report)
 
@@ -1107,10 +1153,10 @@ def process(
             log.append(
                 "✔ Automatic image placement: "
                 f"{placement_report.images_inserted} of "
-                f"{placement_report.total_placeholders} placeholder(s) replaced"
+                f"{placement_report.total_placeholders} image position(s) found"
             )
         else:
-            log.append("ℹ No numbered image placeholders were detected")
+            log.append("ℹ No downloadable image links or numbered image placeholders were detected")
 
         if placement_report.missing_numbers:
             missing = ", ".join(

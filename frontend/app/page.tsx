@@ -1018,8 +1018,8 @@ function FormatterPanel() {
           <div>
             <h3>Images</h3>
             <p>
-              Linked images are downloaded first; uploaded images take priority
-              for the same number.
+              Images from named or unnamed photo links are inserted automatically.
+              Numbered manual image uploads still take priority.
             </p>
           </div>
         </div>
@@ -1034,8 +1034,8 @@ function FormatterPanel() {
           <span>
             <strong>Automatically retrieve linked images</strong>
             <small>
-              Supports direct image URLs and configured Magnific / Freepik
-              resource links.
+              No IMAGE1 numbering needed: supports linked image files, recognised
+              photo pages, and configured Magnific / Freepik links.
             </small>
           </span>
         </label>
@@ -1126,7 +1126,7 @@ function FormatterPanel() {
             <>
               <div className="metrics">
                 <div>
-                  <span>Placeholders</span>
+                  <span>Image positions</span>
                   <strong>{imageDetails?.placeholders ?? 0}</strong>
                 </div>
 
@@ -1151,7 +1151,7 @@ function FormatterPanel() {
                   <strong>Some downloaded images were not inserted.</strong>{" "}
                   {unplacedLinkedDownloads.map((number) => `Image ${number}`).join(", ")}
                   {" "}could not be matched to a position in the formatted Word document.
-                  Check the original IMAGE labels or upload the images manually.
+                  Check the original photo link or upload the images manually.
                   The validation report has more details.
                 </div>
               )}
@@ -1879,7 +1879,7 @@ function FormatterPanel() {
                     : "DOWNLOAD FAILED";
                   return (
                     <div key={`${entry.number}-${entry.url}`}>
-                      <strong>Image {entry.number}</strong>
+                      <strong>{entry.numbered === false ? (entry.label || `Linked image ${entry.number}`) : `Image ${entry.number}`}</strong>
 
                       <span className={`status ${className}`}>{label}</span>
 
@@ -1887,7 +1887,7 @@ function FormatterPanel() {
                         {placed
                           ? `Embedded in the formatted Word document (${entry.source_type})`
                           : downloaded
-                            ? "Downloaded successfully, but no matching insertion point was found."
+                            ? "Downloaded successfully, but the source photo link was not found after formatting."
                             : entry.message || entry.source_type}
                       </small>
                     </div>

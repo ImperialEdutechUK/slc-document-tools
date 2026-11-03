@@ -1,3 +1,13 @@
+## Automatic image links without numbered labels
+
+In the **Document Formatter** tab, enable **Automatically retrieve linked images**.
+The formatter now recognises image-specific hyperlinks labelled with arbitrary
+text (e.g. **Workplace photo**, **See photograph**, **Click here**) and embeds
+available JPG/PNG/WebP photographs after the corresponding linked paragraph.
+Numbered IMAGE1 placeholders still work, while ordinary website links and
+references are ignored. See `UNNUMBERED_IMAGE_LINKS_FIX.md` for supported link
+types, downloading limitations, verification and deployment steps.
+
 # SLC Document Tools — Vercel + Railway migration
 
 This repository contains the production migration of the existing Streamlit **SLC Word Formatter** into a split web architecture:

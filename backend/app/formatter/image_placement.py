@@ -1,4 +1,4 @@
-"""Automatic numbered image placement for WordprocessingML documents.
+"""Automatic numbered-placeholder and arbitrary image-link placement for DOCX.
 
 The module deliberately works at XML level so the formatter can replace image
 placeholder paragraphs without rebuilding the document or losing existing
@@ -346,6 +346,8 @@ def _linked_anchor_paragraph(
     relationships_root: ET.Element,
     url: str,
     number: int,
+    *,
+    occurrence: int = 0,
 ) -> ET.Element | None:
     """Find the actual Word hyperlink that supplied a downloaded image.
 
@@ -361,26 +363,28 @@ def _linked_anchor_paragraph(
     }
     anchors: List[ET.Element] = []
     for paragraph in paragraphs:
-        has_link = any(
+        # A single paragraph can contain more than one link to the same image.
+        # Retain each occurrence rather than always anchoring to the first link.
+        link_count = sum(
             hyperlink.get(_qn(R_NS, "id")) in link_ids
             for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink"))
-        ) if link_ids else False
-        has_url_text = url in paragraph_text(paragraph) or any(
-            url in (node.text or "")
+        ) if link_ids else 0
+        raw_url_count = paragraph_text(paragraph).count(url) + sum(
+            (node.text or "").count(url)
             for node in paragraph.iter(_qn(W_NS, "instrText"))
         )
-        if has_link or has_url_text:
-            anchors.append(paragraph)
+        anchors.extend([paragraph] * max(link_count, raw_url_count))
 
     if not anchors:
         return None
 
-    # Prefer the hyperlink paragraph that contains the actual image label.
+    # An explicit numbered marker should still take priority when present.
     number_pattern = re.compile(rf"\bimage\s*[-:#]?\s*0*{number}\b", re.IGNORECASE)
-    for paragraph in anchors:
-        if number_pattern.search(_clean_placeholder_text(paragraph_text(paragraph))):
-            return paragraph
-    return anchors[0]
+    if occurrence == 0:
+        for paragraph in anchors:
+            if number_pattern.search(_clean_placeholder_text(paragraph_text(paragraph))):
+                return paragraph
+    return anchors[occurrence] if occurrence < len(anchors) else None
 
 
 def _ensure_child(parent: ET.Element, namespace: str, tag: str) -> ET.Element:
@@ -558,6 +562,7 @@ def insert_numbered_images(
     writable_width_inches: float = DEFAULT_WRITABLE_WIDTH_INCHES,
     writable_height_inches: float = DEFAULT_WRITABLE_HEIGHT_INCHES,
     linked_image_urls: Mapping[int, str] | None = None,
+    linked_image_anchor_texts: Mapping[int, str] | None = None,
 ) -> PlacementReport:
     """Replace all detected numbered placeholders in one document scan."""
     register_namespaces()
@@ -589,6 +594,8 @@ def insert_numbered_images(
     media_dir.mkdir(parents=True, exist_ok=True)
     image_relationships: Dict[int, str] = {}
     last_inserted_after: Dict[ET.Element, ET.Element] = {}
+    linked_anchor_occurrences: Counter[str] = Counter()
+    fingerprint_occurrences: Counter[str] = Counter()
 
     max_width = min(max_width_inches, writable_width_inches * 0.90)
     # Leave room for a heading/caption and normal paragraph flow. This also
@@ -665,12 +672,40 @@ def insert_numbered_images(
     for number, url in (linked_image_urls or {}).items():
         if number in used_numbers or number not in catalog.selected:
             continue
-        anchor = _linked_anchor_paragraph(paragraphs, relationships_root, url, number)
+        anchor = _linked_anchor_paragraph(
+            paragraphs, relationships_root, url, number,
+            occurrence=linked_anchor_occurrences[url],
+        )
+        if anchor is None:
+            # Word may store the original link as a field code, or a format
+            # conversion may remove its relationship while retaining its
+            # visible caption. Locate that *same original paragraph text*
+            # rather than silently dropping the downloaded photo. Do not
+            # guess a position from a generic word like "Photo".
+            original = _clean_placeholder_text(
+                (linked_image_anchor_texts or {}).get(number, "")
+            )
+            if original:
+                candidates = [
+                    paragraph for paragraph in paragraphs
+                    if _clean_placeholder_text(paragraph_text(paragraph)) == original
+                ]
+                # Repeated identical paragraphs are resolved in source order.
+                # When there is only one paragraph with multiple image links,
+                # multiple photographs are placed below the same paragraph.
+                if len(candidates) == 1:
+                    anchor = candidates[0]
+                elif candidates:
+                    index = fingerprint_occurrences[original]
+                    if index < len(candidates):
+                        anchor = candidates[index]
+                        fingerprint_occurrences[original] += 1
         if anchor is None:
             continue
         report.total_placeholders += 1
         placeholder_counts[number] += 1
-        place_image(anchor, number, replace_label=False)
+        if place_image(anchor, number, replace_label=False):
+            linked_anchor_occurrences[url] += 1
 
     report.placeholder_counts = dict(sorted(placeholder_counts.items()))
     report.missing_numbers = sorted(
@@ -700,7 +735,7 @@ def build_validation_report(catalog: ImageCatalog, report: PlacementReport) -> s
     lines: List[str] = [
         "Document Formatting Complete",
         "",
-        f"Total placeholders found: {report.total_placeholders}",
+        f"Image insertion positions found: {report.total_placeholders}",
         f"Images inserted: {report.images_inserted}",
         f"Missing images: {len(report.missing_numbers)}",
         f"Unused uploaded images: {len(report.unused_uploaded_images)}",

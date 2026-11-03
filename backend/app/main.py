@@ -52,7 +52,7 @@ from .services.course_images import CourseImagesError, build_course_image_packag
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v20-reliable-linked-image-placement"
+BUILD_VERSION = "2026.11.03-v22-content-safe-image-anchors"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -172,7 +172,8 @@ def _linked_report_text(link_result: LinkedImageResult) -> str:
             "failed": "FAILED",
             "manual_override": "MANUAL OVERRIDE",
         }.get(entry.status, entry.status.upper())
-        line = f"Image {entry.number}: {label} - {entry.source_type} - {entry.url}"
+        display = f"Image {entry.number}" if entry.numbered else f"Linked image {entry.number} ({entry.label or 'unnamed link'})"
+        line = f"{display}: {label} - {entry.source_type} - {entry.url}"
         if entry.message:
             line += f" ({entry.message})"
         lines.append(line)
@@ -228,6 +229,11 @@ async def format_document(
                 for entry in linked_result.entries
                 if entry.status == "downloaded"
             },
+            linked_image_anchor_texts={
+                entry.number: entry.anchor_text
+                for entry in linked_result.entries
+                if entry.status == "downloaded"
+            },
         )
         validation_text += _linked_report_text(linked_result)
 
@@ -241,7 +247,8 @@ async def format_document(
                 "\nDownloaded images not placed in the document: "
                 + ", ".join(f"Image {number}" for number in unplaced_downloads)
                 + "\nThe image URL was downloaded, but no matching position remained "
-                "in the Word document. Check the source IMAGE labels and their links.\n"
+                "in the Word document. Check whether the source image link still exists "
+                "after document cover/contents formatting.\n"
             )
 
         stem = _safe_stem(document.filename)

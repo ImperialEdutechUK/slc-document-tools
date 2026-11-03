@@ -75,7 +75,8 @@ class LinkedImageInsertionEndToEndTests(unittest.TestCase):
         source_docx = before.getvalue()
         sources, warnings = scan_linked_image_sources(source_docx)
         self.assertEqual([], warnings)
-        self.assertEqual([1, 2, 3], [source.number for source in sources])
+        # Unnumbered stock-photo hyperlinks now also qualify for insertion.
+        self.assertEqual([1, 2, 3, 4], [source.number for source in sources])
 
         jpg = make_jpg()
         items = [(f"Image {i}.jpg", jpg) for i in range(1, 5)]

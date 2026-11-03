@@ -155,6 +155,11 @@ def format_zip_batch(
                     for entry in linked_result.entries
                     if entry.status == "downloaded"
                 },
+                linked_image_anchor_texts={
+                    entry.number: entry.anchor_text
+                    for entry in linked_result.entries
+                    if entry.status == "downloaded"
+                },
             )
             aggregate.linked_downloaded += linked_result.to_dict()["downloaded"]
             aggregate.linked_failed += linked_result.to_dict()["failed"]
