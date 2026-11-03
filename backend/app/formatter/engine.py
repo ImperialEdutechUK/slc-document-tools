@@ -959,6 +959,8 @@ def process(
     course_name,
     chapter,
     numbered_image_items=None,
+    *,
+    linked_image_urls=None,
 ):
     template_bytes = get_template_bytes()
     image_catalog = prepare_image_catalog(numbered_image_items or [])
@@ -1097,6 +1099,7 @@ def process(
             ct_root,
             media_out,
             image_catalog,
+            linked_image_urls=linked_image_urls,
         )
         validation_text = build_validation_report(image_catalog, placement_report)
 

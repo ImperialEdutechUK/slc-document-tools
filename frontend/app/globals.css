@@ -819,6 +819,16 @@ a {
    ERRORS / RESULTS
 ------------------------------------------------------- */
 
+/* Distinguish a successful download from a photo actually embedded in Word. */
+.warning-box {
+  padding: 14px 18px;
+  border: 1px solid #b58b42;
+  border-radius: 12px;
+  background: rgba(181, 139, 66, 0.12);
+  color: #f2d3a0;
+  line-height: 1.6;
+}
+
 .error-box {
   border:
     1px solid

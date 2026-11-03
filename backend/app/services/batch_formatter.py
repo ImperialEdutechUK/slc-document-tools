@@ -52,6 +52,8 @@ class _Aggregate:
     failed: int = 0
     linked_downloaded: int = 0
     linked_failed: int = 0
+    images_inserted: int = 0
+    linked_unplaced: int = 0
     formatted_files: list[str] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
     failures: list[BatchFailure] = field(default_factory=list)
@@ -148,9 +150,20 @@ def format_zip_batch(
                 course_name,
                 _friendly_title(document.filename),
                 linked_result.items,
+                linked_image_urls={
+                    entry.number: entry.url
+                    for entry in linked_result.entries
+                    if entry.status == "downloaded"
+                },
             )
             aggregate.linked_downloaded += linked_result.to_dict()["downloaded"]
             aggregate.linked_failed += linked_result.to_dict()["failed"]
+            placed_numbers = set(placement_report.used_image_numbers) if placement_report is not None else set()
+            aggregate.images_inserted += placement_report.images_inserted if placement_report is not None else 0
+            aggregate.linked_unplaced += sum(
+                entry.status == "downloaded" and entry.number not in placed_numbers
+                for entry in linked_result.entries
+            )
             aggregate.formatted += 1
 
             formatted_name = _unique_name(
@@ -199,6 +212,8 @@ def format_zip_batch(
         "linked_images": {
             "downloaded": aggregate.linked_downloaded,
             "failed": aggregate.linked_failed,
+            "not_inserted": aggregate.linked_unplaced,
+            "inserted": aggregate.images_inserted,
         },
     }
     return BatchResult(output_filename, output.getvalue(), details)

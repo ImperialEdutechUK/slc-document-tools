@@ -108,6 +108,9 @@ def scan_linked_image_sources(docx_bytes: bytes) -> tuple[list[LinkedImageSource
 
     for paragraph in root.iter(_qn(W_NS, "p")):
         text = " ".join("".join(node.text or "" for node in paragraph.iter(_qn(W_NS, "t"))).split())
+        # Word can insert invisible characters into underlined IMAGE5 labels.
+        # Remove those only for matching; the source DOCX is never changed.
+        text = re.sub(r"[\u00ad\u200b-\u200f\u2060\ufeff]", "", text)
         urls: list[str] = []
 
         for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink")):

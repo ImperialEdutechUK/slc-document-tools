@@ -52,7 +52,7 @@ from .services.course_images import CourseImagesError, build_course_image_packag
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.10.26-v19-direct-word-download-visible-image-options"
+BUILD_VERSION = "2026.11.03-v20-reliable-linked-image-placement"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -223,8 +223,26 @@ async def format_document(
             course_name,
             chapter,
             all_image_items,
+            linked_image_urls={
+                entry.number: entry.url
+                for entry in linked_result.entries
+                if entry.status == "downloaded"
+            },
         )
         validation_text += _linked_report_text(linked_result)
+
+        placed_numbers = set(placement_report.used_image_numbers)
+        unplaced_downloads = [
+            entry.number for entry in linked_result.entries
+            if entry.status == "downloaded" and entry.number not in placed_numbers
+        ]
+        if unplaced_downloads:
+            validation_text += (
+                "\nDownloaded images not placed in the document: "
+                + ", ".join(f"Image {number}" for number in unplaced_downloads)
+                + "\nThe image URL was downloaded, but no matching position remained "
+                "in the Word document. Check the source IMAGE labels and their links.\n"
+            )
 
         stem = _safe_stem(document.filename)
         output_filename = f"{stem}_SLC_formatted.docx"
@@ -246,6 +264,8 @@ async def format_document(
                 "missing": list(placement_report.missing_numbers),
                 "unused": list(placement_report.unused_uploaded_images),
                 "duplicates": image_catalog.duplicate_image_numbers,
+                "placed_numbers": placement_report.used_image_numbers,
+                "unplaced_downloads": unplaced_downloads,
             },
             "linked_images": linked_result.to_dict(),
         }

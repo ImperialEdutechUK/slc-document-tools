@@ -875,6 +875,8 @@ function FormatterPanel() {
 
   const imageDetails = job?.details?.images;
   const linked = job?.details?.linked_images;
+  const placedImageNumbers: number[] = imageDetails?.placed_numbers ?? [];
+  const unplacedLinkedDownloads: number[] = imageDetails?.unplaced_downloads ?? [];
   const batchDetails = batchMode ? job?.details : null;
 
   const filteredEditableParagraphs = useMemo(() => {
@@ -1143,6 +1145,16 @@ function FormatterPanel() {
                   <strong>{linked?.downloaded ?? 0}</strong>
                 </div>
               </div>
+
+              {unplacedLinkedDownloads.length > 0 && (
+                <div className="warning-box" role="alert">
+                  <strong>Some downloaded images were not inserted.</strong>{" "}
+                  {unplacedLinkedDownloads.map((number) => `Image ${number}`).join(", ")}
+                  {" "}could not be matched to a position in the formatted Word document.
+                  Check the original IMAGE labels or upload the images manually.
+                  The validation report has more details.
+                </div>
+              )}
 
               <section className="card workflow-card">
                 <div className="section-heading">
@@ -1855,17 +1867,32 @@ function FormatterPanel() {
               <h3>Linked image results</h3>
 
               <div className="link-results">
-                {linked.entries.map((entry: any) => (
-                  <div key={`${entry.number}-${entry.url}`}>
-                    <strong>Image {entry.number}</strong>
+                {linked.entries.map((entry: any) => {
+                  const placed = placedImageNumbers.includes(entry.number);
+                  const downloaded = entry.status === "downloaded";
+                  const manual = entry.status === "manual_override";
+                  const className = downloaded || manual
+                    ? placed ? "downloaded" : "failed"
+                    : "failed";
+                  const label = downloaded || manual
+                    ? placed ? "INSERTED" : "NOT INSERTED"
+                    : "DOWNLOAD FAILED";
+                  return (
+                    <div key={`${entry.number}-${entry.url}`}>
+                      <strong>Image {entry.number}</strong>
 
-                    <span className={`status ${entry.status}`}>
-                      {entry.status.replace("_", " ")}
-                    </span>
+                      <span className={`status ${className}`}>{label}</span>
 
-                    <small>{entry.message || entry.source_type}</small>
-                  </div>
-                ))}
+                      <small>
+                        {placed
+                          ? `Embedded in the formatted Word document (${entry.source_type})`
+                          : downloaded
+                            ? "Downloaded successfully, but no matching insertion point was found."
+                            : entry.message || entry.source_type}
+                      </small>
+                    </div>
+                  );
+                })}
               </div>
             </section>
           )}

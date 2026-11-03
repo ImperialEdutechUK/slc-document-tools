@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 import re
+import unicodedata
 import zipfile
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 import xml.etree.ElementTree as ET
@@ -53,7 +54,7 @@ IMAGE_FILENAME_RE = re.compile(
 PLACEHOLDER_RE = re.compile(
     r"^\s*(?P<prefix>(?:(?:unit|module|lesson|chapter|section|topic|figure|placeholder)"
     r"\s*[\w.()/-]+\s*(?:[-–—:|]\s*)?)*)"
-    r"image\s*(?:number|no\.?|#)?\s*[:#\-–—]?\s*0*(?P<number>\d+)\s*[.)]?\s*$",
+    r"image\s*(?:number|no\.?|#)?\s*[:#\-–—]?\s*0*(?P<number>\d+)\s*[.):]?\s*$",
     re.IGNORECASE,
 )
 
@@ -305,11 +306,81 @@ def paragraph_text(paragraph: ET.Element) -> str:
     return " ".join(text.replace("\u00a0", " ").split())
 
 
+def _clean_placeholder_text(text: str) -> str:
+    """Ignore Word's invisible formatting characters in image labels.
+
+    A label can *look* exactly like IMAGE5 in Word/PDF but contain a zero-width
+    space, non-breaking joiner or soft hyphen, preventing a literal full match.
+    We normalise only for detection; source body text is never rewritten.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"[\u00ad\u200b-\u200f\u2060\ufeff]", "", text)
+    return " ".join(text.split())
+
+
 def extract_placeholder_number(text: str) -> int | None:
-    if not text or len(text) > 180:
+    if not text or len(text) > 240:
         return None
-    match = PLACEHOLDER_RE.fullmatch(text)
+    match = PLACEHOLDER_RE.fullmatch(_clean_placeholder_text(text))
     return int(match.group("number")) if match else None
+
+
+def _hyperlink_placeholder_number(paragraph: ET.Element) -> int | None:
+    """Find an explicitly linked IMAGE5 token even inside a longer paragraph.
+
+    Linked-image discovery accepts image labels anywhere in a paragraph; the
+    original placement code accepted only standalone paragraphs. This mismatch
+    meant the UI could report DOWNLOAD SUCCESS while the document showed IMAGE5.
+    Restrict this fallback to hyperlink text, not ordinary prose references.
+    """
+    numbers = {
+        number
+        for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink"))
+        if (number := extract_placeholder_number(paragraph_text(hyperlink))) is not None
+    }
+    return next(iter(numbers)) if len(numbers) == 1 else None
+
+
+def _linked_anchor_paragraph(
+    paragraphs: Sequence[ET.Element],
+    relationships_root: ET.Element,
+    url: str,
+    number: int,
+) -> ET.Element | None:
+    """Find the actual Word hyperlink that supplied a downloaded image.
+
+    Some documents put the link beside surrounding text, or in a separate
+    paragraph after IMAGE5. In that case we can still insert the image next to
+    its source link without deleting or rewriting any of that paragraph text.
+    """
+    link_ids = {
+        relation.get("Id")
+        for relation in relationships_root
+        if relation.get("TargetMode") == "External"
+        and relation.get("Target") == url
+    }
+    anchors: List[ET.Element] = []
+    for paragraph in paragraphs:
+        has_link = any(
+            hyperlink.get(_qn(R_NS, "id")) in link_ids
+            for hyperlink in paragraph.iter(_qn(W_NS, "hyperlink"))
+        ) if link_ids else False
+        has_url_text = url in paragraph_text(paragraph) or any(
+            url in (node.text or "")
+            for node in paragraph.iter(_qn(W_NS, "instrText"))
+        )
+        if has_link or has_url_text:
+            anchors.append(paragraph)
+
+    if not anchors:
+        return None
+
+    # Prefer the hyperlink paragraph that contains the actual image label.
+    number_pattern = re.compile(rf"\bimage\s*[-:#]?\s*0*{number}\b", re.IGNORECASE)
+    for paragraph in anchors:
+        if number_pattern.search(_clean_placeholder_text(paragraph_text(paragraph))):
+            return paragraph
+    return anchors[0]
 
 
 def _ensure_child(parent: ET.Element, namespace: str, tag: str) -> ET.Element:
@@ -486,6 +557,7 @@ def insert_numbered_images(
     max_width_inches: float = 6.0,
     writable_width_inches: float = DEFAULT_WRITABLE_WIDTH_INCHES,
     writable_height_inches: float = DEFAULT_WRITABLE_HEIGHT_INCHES,
+    linked_image_urls: Mapping[int, str] | None = None,
 ) -> PlacementReport:
     """Replace all detected numbered placeholders in one document scan."""
     register_namespaces()
@@ -516,23 +588,19 @@ def insert_numbered_images(
     media_dir = Path(media_directory)
     media_dir.mkdir(parents=True, exist_ok=True)
     image_relationships: Dict[int, str] = {}
+    last_inserted_after: Dict[ET.Element, ET.Element] = {}
 
     max_width = min(max_width_inches, writable_width_inches * 0.90)
     # Leave room for a heading/caption and normal paragraph flow. This also
     # prevents tall portrait images from consuming an entire writable page.
     max_height = writable_height_inches * 0.78
 
-    for paragraph in paragraphs:
-        number = extract_placeholder_number(paragraph_text(paragraph))
-        if number is None:
-            continue
-
-        report.total_placeholders += 1
-        placeholder_counts[number] += 1
+    def place_image(paragraph: ET.Element, number: int, *, replace_label: bool) -> bool:
+        nonlocal relationship_counter, next_doc_property_id
         image = catalog.selected.get(number)
         if image is None:
             report.missing_placeholder_occurrences += 1
-            continue
+            return False
 
         if number not in image_relationships:
             relationship_id, relationship_counter = _next_relationship_id(
@@ -553,8 +621,17 @@ def insert_numbered_images(
             image_relationships[number] = relationship_id
 
         width_emu, height_emu = _calculate_size_emu(image, max_width, max_height)
-        _set_paragraph_image_format(paragraph)
-        paragraph.append(
+        target = paragraph
+        if not replace_label:
+            parent = parent_by_child.get(paragraph)
+            if parent is None:
+                return False
+            target = ET.Element(_qn(W_NS, "p"))
+            preceding = last_inserted_after.get(paragraph, paragraph)
+            parent.insert(list(parent).index(preceding) + 1, target)
+            last_inserted_after[paragraph] = target
+        _set_paragraph_image_format(target)
+        target.append(
             _make_drawing_run(
                 image_relationships[number],
                 Path(PurePosixPath(image.source_name).name).name,
@@ -567,6 +644,33 @@ def insert_numbered_images(
         report.images_inserted += 1
         used_numbers.add(number)
         used_source_files.add(image.source_name)
+        return True
+
+    # An image placeholder may be a standalone Word hyperlink or an IMAGE5
+    # hyperlink inside a longer paragraph. Preserve all other body text.
+    parent_by_child = {child: parent for parent in root.iter() for child in parent}
+    for paragraph in paragraphs:
+        exact_number = extract_placeholder_number(paragraph_text(paragraph))
+        number = exact_number if exact_number is not None else _hyperlink_placeholder_number(paragraph)
+        if number is None:
+            continue
+        report.total_placeholders += 1
+        placeholder_counts[number] += 1
+        place_image(paragraph, number, replace_label=exact_number is not None)
+
+    # Final fallback: a genuine downloaded image URL was located, but the text
+    # around it was not a standalone placeholder (e.g. label + visible URL,
+    # or an unusual Word hyperlink). Anchor the photograph to that URL instead
+    # of silently dropping it. Do not remove surrounding text or headings.
+    for number, url in (linked_image_urls or {}).items():
+        if number in used_numbers or number not in catalog.selected:
+            continue
+        anchor = _linked_anchor_paragraph(paragraphs, relationships_root, url, number)
+        if anchor is None:
+            continue
+        report.total_placeholders += 1
+        placeholder_counts[number] += 1
+        place_image(anchor, number, replace_label=False)
 
     report.placeholder_counts = dict(sorted(placeholder_counts.items()))
     report.missing_numbers = sorted(
