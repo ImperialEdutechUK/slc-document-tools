@@ -15,7 +15,9 @@ from docx.enum.text import WD_BREAK
 from PIL import Image
 
 from app.formatter.engine import process
-from app.formatter.image_placement import insert_numbered_images
+from app.formatter.image_placement import (
+    insert_numbered_images, verify_final_image_placements,
+)
 from app.services.linked_images import download_linked_images
 
 
@@ -57,6 +59,46 @@ def format_with_downloads(source):
 
 
 class FiveDownloadedNotInsertedTests(unittest.TestCase):
+    def test_five_links_in_one_paragraph_before_page_break_all_insert(self):
+        """One image-link paragraph used to be mistaken for a disposable cover."""
+        doc = Document()
+        paragraph = doc.add_paragraph('Illustration sources: ')
+        for number in range(1, 6):
+            add_link(paragraph, f'View photo {number}', f'https://images.example.org/photo-{number}.jpg')
+            paragraph.add_run('  ')
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        doc.add_paragraph('Introduction', style='Heading 1')
+        downloads, formatted, placement = format_with_downloads(as_bytes(doc))
+        self.assertEqual(5, downloads.to_dict()['downloaded'])
+        self.assertEqual(5, placement.images_inserted)
+        self.assertEqual(5, len(formatted.inline_shapes))
+        self.assertTrue(any('Illustration sources:' in p.text for p in formatted.paragraphs))
+
+    def test_five_image_links_inside_table_before_toc_all_insert(self):
+        """TOC cleanup must not remove the whole table of image-source links."""
+        doc = Document()
+        doc.add_paragraph('Course title')
+        table = doc.add_table(rows=5, cols=1)
+        for number in range(1, 6):
+            add_link(table.rows[number-1].cells[0].paragraphs[0],
+                     f'View photo {number}', f'https://images.example.org/photo-{number}.jpg')
+        doc.add_paragraph('Table of Contents', style='Heading 1')
+        doc.add_paragraph('Introduction', style='Heading 1')
+        downloads, formatted, placement = format_with_downloads(as_bytes(doc))
+        self.assertEqual(5, downloads.to_dict()['downloaded'])
+        self.assertEqual(5, placement.images_inserted)
+        # Count pictures *inside the table*, excluding generated cover art.
+        # A misleading placement report used to claim 5/5 even when the
+        # formatter silently removed this entire table after insertion.
+        self.assertEqual(5, len(formatted.tables[0].rows))
+        table_pictures = sum(
+            len(paragraph._p.xpath('.//w:drawing'))
+            for row in formatted.tables[0].rows for cell in row.cells
+            for paragraph in cell.paragraphs
+        )
+        self.assertEqual(5, table_pictures)
+        self.assertIn('View photo 5', formatted.tables[0].rows[4].cells[0].text)
+
     def test_unit_images_on_first_page_before_manual_page_break_are_preserved(self):
         """Old cover-removal logic discarded all five linked image anchors."""
         doc = Document()
@@ -101,6 +143,41 @@ class FiveDownloadedNotInsertedTests(unittest.TestCase):
         self.assertEqual(1, placement.images_inserted)
         self.assertEqual(1, len(formatted.inline_shapes))
         self.assertTrue(any('Relevant example: See photograph' in p.text for p in formatted.paragraphs))
+
+    def test_report_verifies_media_is_still_referenced_in_saved_docx(self):
+        """Do not claim INSERTED if a later step removes the inserted drawing."""
+        doc = Document()
+        add_link(doc.add_paragraph('Training image: '), 'View photo',
+                 'https://images.example.org/verified.jpg')
+        with patch('app.services.linked_images._download_image_link', return_value=jpg()):
+            downloads = download_linked_images(as_bytes(doc))
+        output, _log, _validation, placement, catalog = process(
+            as_bytes(doc), None, 'jpg', 'South London College', 'Course', 'Unit',
+            downloads.items,
+            linked_image_urls={e.number:e.url for e in downloads.entries},
+            linked_image_anchor_texts={e.number:e.anchor_text for e in downloads.entries},
+        )
+        self.assertEqual(1, placement.images_inserted)
+        # Remove the embedding reference in an otherwise valid ZIP. The media
+        # file remains in /word/media, but is no longer drawn in the document.
+        import xml.etree.ElementTree as ET
+        import zipfile
+        with zipfile.ZipFile(BytesIO(output)) as original:
+            rewritten = BytesIO()
+            with zipfile.ZipFile(rewritten, 'w') as modified:
+                for item in original.infolist():
+                    data = original.read(item.filename)
+                    if item.filename == 'word/document.xml':
+                        root = ET.fromstring(data)
+                        for blip in root.iter('{http://schemas.openxmlformats.org/drawingml/2006/main}blip'):
+                            if blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed') in placement.image_relationships.values():
+                                blip.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed', 'missing-rel')
+                        data = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+                    modified.writestr(item, data)
+        lost = verify_final_image_placements(rewritten.getvalue(), catalog, placement)
+        self.assertEqual([1], lost)
+        self.assertEqual(0, placement.images_inserted)
+        self.assertEqual([], placement.used_image_numbers)
 
     def test_genuine_title_only_cover_is_still_removed(self):
         doc = Document()

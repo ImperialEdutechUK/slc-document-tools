@@ -1,3 +1,5 @@
+> **Document Formatter v23 image placement fix:** See [`IMAGE_INSERTION_V23.md`](IMAGE_INSERTION_V23.md) for correction of downloaded-but-not-inserted photo links and deployment steps.
+
 ## Automatic image links without numbered labels
 
 In the **Document Formatter** tab, enable **Automatically retrieve linked images**.

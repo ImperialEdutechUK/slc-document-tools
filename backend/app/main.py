@@ -52,7 +52,7 @@ from .services.course_images import CourseImagesError, build_course_image_packag
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v22-content-safe-image-anchors"
+BUILD_VERSION = "2026.11.03-v23-stable-image-bookmarks"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")

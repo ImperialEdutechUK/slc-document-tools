@@ -92,6 +92,8 @@ class PlacementReport:
     used_image_numbers: List[int] = field(default_factory=list)
     used_source_files: List[str] = field(default_factory=list)
     unused_uploaded_images: List[str] = field(default_factory=list)
+    # Internal id map lets the final DOCX be audited after all clean-up steps.
+    image_relationships: Dict[int, str] = field(default_factory=dict)
 
     @property
     def has_warnings(self) -> bool:
@@ -387,6 +389,97 @@ def _linked_anchor_paragraph(
     return anchors[occurrence] if occurrence < len(anchors) else None
 
 
+def stamp_linked_image_anchors(
+    document_root: ET.Element,
+    relationships_root: ET.Element,
+    linked_image_urls: Mapping[int, str] | None,
+    linked_image_anchor_texts: Mapping[int, str] | None = None,
+) -> Dict[int, str]:
+    """Bookmark the *original* source paragraphs before cover/TOC cleanup.
+
+    Linking by URL only after formatting is fragile: cover/contents cleanup may
+    delete a table or one paragraph containing every source hyperlink. A Word
+    bookmark makes each image attachment point an explicit, persistent part of
+    the input DOCX, and enables front-matter removal to protect that content.
+    We do not change the source link or any displayed text.
+    """
+    if not linked_image_urls:
+        return {}
+
+    body = document_root.find(_qn(W_NS, "body"))
+    if body is None:
+        return {}
+    paragraphs = list(body.iter(_qn(W_NS, "p")))
+    used_names = {
+        node.get(_qn(W_NS, "name"), "")
+        for node in document_root.iter(_qn(W_NS, "bookmarkStart"))
+    }
+    existing_ids = []
+    for bookmark in document_root.iter(_qn(W_NS, "bookmarkStart")):
+        try:
+            existing_ids.append(int(bookmark.get(_qn(W_NS, "id"), "0")))
+        except (TypeError, ValueError):
+            pass
+    next_id = max(existing_ids, default=0) + 1
+    occurrences: Counter[str] = Counter()
+    text_occurrences: Counter[str] = Counter()
+    markers: Dict[int, str] = {}
+    for number, url in linked_image_urls.items():
+        # Use the same order in which the source-image scanner found the links.
+        anchor = _linked_anchor_paragraph(
+            paragraphs, relationships_root, url, number,
+            occurrence=occurrences[url],
+        )
+        occurrences[url] += 1
+        if anchor is None:
+            text = _clean_placeholder_text((linked_image_anchor_texts or {}).get(number, ""))
+            if text:
+                candidates = [
+                    paragraph for paragraph in paragraphs
+                    if _clean_placeholder_text(paragraph_text(paragraph)) == text
+                ]
+                if len(candidates) == 1:
+                    anchor = candidates[0]
+                elif candidates:
+                    index = text_occurrences[text]
+                    if index < len(candidates):
+                        anchor = candidates[index]
+                        text_occurrences[text] += 1
+        if anchor is None:
+            continue
+
+        name = f"SLCImageSource{number}"
+        suffix = 2
+        while name in used_names:
+            name = f"SLCImageSource{number}_{suffix}"
+            suffix += 1
+        used_names.add(name)
+        bookmark_id = str(next_id)
+        next_id += 1
+        ET.SubElement(anchor, _qn(W_NS, "bookmarkStart"), {
+            _qn(W_NS, "id"): bookmark_id,
+            _qn(W_NS, "name"): name,
+        })
+        ET.SubElement(anchor, _qn(W_NS, "bookmarkEnd"), {
+            _qn(W_NS, "id"): bookmark_id,
+        })
+        markers[number] = name
+    return markers
+
+
+def _bookmark_anchor_paragraph(
+    paragraphs: Sequence[ET.Element], marker_name: str,
+) -> ET.Element | None:
+    """Look up a stable original-image anchor in the formatted Word tree."""
+    for paragraph in paragraphs:
+        if any(
+            bookmark.get(_qn(W_NS, "name")) == marker_name
+            for bookmark in paragraph.iter(_qn(W_NS, "bookmarkStart"))
+        ):
+            return paragraph
+    return None
+
+
 def _ensure_child(parent: ET.Element, namespace: str, tag: str) -> ET.Element:
     qname = _qn(namespace, tag)
     child = parent.find(qname)
@@ -563,6 +656,7 @@ def insert_numbered_images(
     writable_height_inches: float = DEFAULT_WRITABLE_HEIGHT_INCHES,
     linked_image_urls: Mapping[int, str] | None = None,
     linked_image_anchor_texts: Mapping[int, str] | None = None,
+    linked_image_bookmarks: Mapping[int, str] | None = None,
 ) -> PlacementReport:
     """Replace all detected numbered placeholders in one document scan."""
     register_namespaces()
@@ -672,10 +766,13 @@ def insert_numbered_images(
     for number, url in (linked_image_urls or {}).items():
         if number in used_numbers or number not in catalog.selected:
             continue
-        anchor = _linked_anchor_paragraph(
-            paragraphs, relationships_root, url, number,
-            occurrence=linked_anchor_occurrences[url],
-        )
+        marker = (linked_image_bookmarks or {}).get(number)
+        anchor = _bookmark_anchor_paragraph(paragraphs, marker) if marker else None
+        if anchor is None:
+            anchor = _linked_anchor_paragraph(
+                paragraphs, relationships_root, url, number,
+                occurrence=linked_anchor_occurrences[url],
+            )
         if anchor is None:
             # Word may store the original link as a field code, or a format
             # conversion may remove its relationship while retaining its
@@ -718,6 +815,7 @@ def insert_numbered_images(
     }
     report.used_image_numbers = sorted(used_numbers)
     report.used_source_files = sorted(used_source_files, key=str.lower)
+    report.image_relationships = dict(image_relationships)
 
     # Every valid uploaded file that was not selected and inserted is unused.
     report.unused_uploaded_images = sorted(
@@ -729,6 +827,71 @@ def insert_numbered_images(
         key=str.lower,
     )
     return report
+
+
+def verify_final_image_placements(
+    docx_bytes: bytes,
+    catalog: ImageCatalog,
+    report: PlacementReport,
+) -> List[int]:
+    """Reconcile reported insertions against drawings in the *saved* DOCX.
+
+    An image can be inserted successfully and then accidentally deleted by a
+    later formatting pass. Do not report INSERTED unless the final Word XML
+    still references that exact image relationship, not merely an unused file
+    sitting in /word/media.
+
+    Returns image numbers that had insertion attempts but no surviving draw.
+    """
+    if not report.image_relationships:
+        return []
+    with zipfile.ZipFile(BytesIO(docx_bytes)) as docx:
+        root = ET.fromstring(docx.read("word/document.xml"))
+        rels = ET.fromstring(docx.read("word/_rels/document.xml.rels"))
+        package_names = set(docx.namelist())
+
+    # A visible <a:blip> alone is not enough: its rId must resolve to
+    # embedded media that is still present in the DOCX ZIP package.
+    image_rids_with_media = set()
+    for relationship in rels:
+        if not (relationship.get("Type") or "").endswith("/image"):
+            continue
+        if relationship.get("TargetMode") == "External":
+            continue
+        target = (relationship.get("Target") or "").replace("\\", "/")
+        if target.startswith("/word/"):
+            media_path = target.lstrip("/")
+        elif target.startswith("media/"):
+            media_path = "word/" + target
+        else:
+            # Not a normal image location for this formatter.
+            continue
+        if media_path in package_names:
+            image_rids_with_media.add(relationship.get("Id"))
+
+    draws: Counter[str] = Counter(
+        blip.get(_qn(R_NS, "embed"))
+        for blip in root.iter(_qn(A_NS, "blip"))
+    )
+    counts = {
+        number: draws.get(rid, 0) if rid in image_rids_with_media else 0
+        for number, rid in report.image_relationships.items()
+    }
+    lost = sorted(number for number, count in counts.items() if count == 0)
+    used = sorted(number for number, count in counts.items() if count > 0)
+    report.images_inserted = sum(counts.values())
+    report.used_image_numbers = used
+    report.used_source_files = sorted(
+        {catalog.selected[number].source_name for number in used
+         if number in catalog.selected},
+        key=str.lower,
+    )
+    report.unused_uploaded_images = sorted(
+        {image.source_name for image in catalog.valid_files
+         if image.source_name not in report.used_source_files},
+        key=str.lower,
+    )
+    return lost
 
 
 def build_validation_report(catalog: ImageCatalog, report: PlacementReport) -> str:
