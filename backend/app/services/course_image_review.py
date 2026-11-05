@@ -1,17 +1,19 @@
-"""Two-stage image review workflow: find photos, show previews, then insert selected.
+"""Private, multi-batch review of stock photos for DOCX and course ZIPs.
 
-The preview archive is a private backend artifact; originals and acquired photo
-bytes are never sent to the browser until explicitly downloaded as the final Word
-file. Confirming a preview requires no additional provider API calls or credits.
+Each pass has a bounded stock/search budget. Progress and downloaded candidates
+live in the private review bundle so a later pass can continue without repeating
+completed searches, and final confirmation never calls photo providers.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from io import BytesIO
+from io import BytesIO, StringIO
+import csv
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import time
 import zipfile
 
@@ -19,14 +21,18 @@ from docx import Document
 
 from .course_images import (
     CourseImagesError, CourseImagesResult, ImagePlan, Picture, Provider,
+    MAX_ARCHIVE_BYTES, MAX_ARCHIVE_FILES, MAX_DOCUMENT_BYTES,
     _insert_images, _plans, _read_chapters, _safe_name, _chapter_overview,
 )
 from .course_image_library import ImageLibrary, SavedImage
+from .zip_utils import normalise_zip_name, safe_zip_member
 
+# Per-request budgets; the complete ZIP may be processed in several passes.
 MAX_PREVIEW_IMAGES = max(1, min(60, int(os.getenv("COURSE_IMAGE_MAX_PREVIEW_IMAGES", "16"))))
+MAX_TOTAL_IMAGES = max(MAX_PREVIEW_IMAGES, min(120, int(os.getenv("COURSE_IMAGE_MAX_TOTAL_PREVIEW_IMAGES", "80"))))
 MAX_STOCK_LOOKUPS = max(MAX_PREVIEW_IMAGES, min(200, int(os.getenv("COURSE_IMAGE_MAX_STOCK_LOOKUPS", "32"))))
 MAX_SEARCH_SECONDS = max(20, min(180, int(os.getenv("COURSE_IMAGE_MAX_SEARCH_SECONDS", "75"))))
-MAX_FREE_REPLACEMENTS = 8
+MAX_FREE_REPLACEMENTS = max(8, min(50, int(os.getenv("COURSE_IMAGE_MAX_FREE_REPLACEMENTS", "24"))))
 
 
 @dataclass
@@ -35,159 +41,257 @@ class PreviewBundle:
     details: dict
 
 
-def make_image_preview(
-    raw: bytes, filename: str, *, course_name: str = "", image_source: str = "mixed",
-    reuse_existing: bool = True, use_openrouter: bool = False, allow_freepik: bool = False,
-    provider: Provider | None = None,
-) -> PreviewBundle:
-    if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik"}:
-        raise CourseImagesError("Invalid stock-image source.")
-    chapters, _ = _read_chapters(raw, filename)
+def _balanced_plans(plans: list[ImagePlan], target: int) -> list[ImagePlan]:
+    """Sample planned positions across an entire chapter, not just its start."""
+    if target <= 0 or len(plans) <= target:
+        return plans
+    return [plans[min(len(plans) - 1, int((i + .5) * len(plans) / target))] for i in range(target)]
+
+
+def _provider_for_review(manifest: dict, provider: Provider | None) -> Provider:
     provider = provider or Provider()
-    provider.stock_source = image_source
-    provider.reuse_existing = reuse_existing
-    # Don't permanently cache a new photo until the user approves it. An
-    # unselected irrelevant suggestion must not keep reappearing from cache.
+    provider.stock_source = manifest["image_source"]
+    provider.reuse_existing = bool(manifest.get("reuse_existing", True))
+    # Only confirmed images may enter the shared image library.
     provider.save_new_to_library = False
-    provider.allow_freepik = allow_freepik
-    if image_source == "freepik" and not allow_freepik:
+    provider.allow_freepik = bool(manifest.get("freepik_enabled", False))
+    if manifest["image_source"] == "freepik" and not provider.allow_freepik:
         raise CourseImagesError("Enable Freepik stock access explicitly, or select free sources only.")
     if not provider.can_acquire(generate=False):
         raise CourseImagesError("No stock-image provider is configured. Set PEXELS_API_KEY or PIXABAY_API_KEY, or enable Openverse.")
+    provider.used_photos.update(item.get("identifier", "") for item in manifest.get("previews", []) if item.get("identifier"))
+    # Freepik paid-credit limits are cumulative across continuation requests.
+    provider.freepik_attempts = int(manifest.get("freepik_search_attempts", 0))
+    provider.freepik_downloads = int(manifest.get("freepik_stock_downloads", 0))
+    return provider
 
-    previews: list[dict] = []
-    names: list[str] = []
-    warnings: list[str] = []
-    images_acquired = 0
-    eligible_total = 0
-    lookups_attempted = 0
-    image_limit_hit = False
-    lookup_limit_hit = False
-    time_limit_hit = False
-    chapter_plans: list[list[tuple[int, str, ImagePlan]]] = []
-    chapter_overviews: list[str] = []
-    out = BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
-        for chapter_index, chapter in enumerate(chapters):
-            names.append(chapter.filename)
-            package.writestr(f"documents/{chapter_index}.docx", chapter.payload)
-            chapter_plans.append([])
-            chapter_overviews.append("")
-            try:
-                doc = Document(BytesIO(chapter.payload))
-                plans, eligible = _plans(doc, f"{course_name} {chapter.title}")
-                chapter_overviews[chapter_index] = _chapter_overview(doc)
-                eligible_total += eligible
-            except Exception as exc:
-                warnings.append(f"{chapter.filename}: cannot plan images ({type(exc).__name__}).")
+
+def _update_progress(manifest: dict) -> None:
+    pending = manifest.get("pending_plans", [])
+    cursor = min(int(manifest.get("next_plan_index", 0)), len(pending))
+    previews = manifest["previews"]
+    chapters = manifest["chapters"]
+    paths = manifest.get("chapter_paths", chapters)
+    eligible = manifest.get("eligible_by_chapter", [0] * len(chapters))
+    manifest["chapter_progress"] = [{
+        "index": index,
+        "name": name,
+        "path": paths[index],
+        "eligible": eligible[index],
+        "planned": sum(int(p["chapter_index"] == index) for p in pending),
+        "searched": sum(int(p["chapter_index"] == index) for p in pending[:cursor]),
+        "found": sum(int(p["chapter_index"] == index) for p in previews),
+    } for index, name in enumerate(chapters)]
+    manifest["images_found"] = len(previews)
+    manifest["planned_image_positions"] = len(pending)
+    manifest["remaining_positions"] = max(0, len(pending) - cursor)
+    manifest["max_total_images"] = MAX_TOTAL_IMAGES
+    manifest["has_more"] = bool(cursor < len(pending) and len(previews) < MAX_TOTAL_IMAGES)
+    manifest["max_free_replacements"] = MAX_FREE_REPLACEMENTS
+
+
+def _run_search_batch(manifest: dict, files: dict[str, bytes], provider: Provider) -> None:
+    pending = manifest["pending_plans"]
+    cursor = min(int(manifest.get("next_plan_index", 0)), len(pending))
+    initial_count = len(manifest["previews"])
+    searches_this_batch = 0
+    started = time.monotonic()
+
+    # Optional text-only prompt refinement is limited to THIS search pass.
+    if manifest.get("use_openrouter") and cursor < len(pending):
+        stop = min(len(pending), cursor + MAX_STOCK_LOOKUPS)
+        for chapter_index in range(len(manifest["chapters"])):
+            chunk = [ImagePlan(**entry["plan"]) for entry in pending[cursor:stop]
+                     if entry["chapter_index"] == chapter_index]
+            if not chunk:
                 continue
-            chapter_plans[chapter_index] = [(chapter_index, chapter.filename, plan) for plan in plans]
+            provider.refine_plans(manifest.get("course_name") or manifest["chapters"][chapter_index],
+                                  manifest["chapters"][chapter_index], chunk,
+                                  chapter_overview=manifest.get("chapter_overviews", [""] * len(manifest["chapters"]))[chapter_index])
+            iterator = iter(chunk)
+            for entry in pending[cursor:stop]:
+                if entry["chapter_index"] == chapter_index:
+                    entry["plan"] = asdict(next(iterator))
 
-        # Fair distribution across chapters. Previously the first chapters
-        # could consume the entire preview limit and later ZIP documents got
-        # no photos at all. Keep one candidate per chapter per round.
-        pending: list[tuple[int, str, ImagePlan]] = []
-        for position in range(max((len(group) for group in chapter_plans), default=0)):
-            for group in chapter_plans:
-                if position < len(group):
-                    pending.append(group[position])
-
-        # Optional text refinement is limited to the planned stock lookups,
-        # avoiding OpenRouter calls for headings we will never search.
-        if use_openrouter:
-            for index, chapter in enumerate(chapters):
-                limited = [plan for chapter_index, _, plan in pending[:MAX_STOCK_LOOKUPS]
-                           if chapter_index == index]
-                if limited:
-                    provider.refine_plans(course_name or chapter.title, chapter.title, limited,
-                                          chapter_overview=chapter_overviews[index])
-
-        started = time.monotonic()
-        for chapter_index, chapter_filename, plan in pending:
-            if len(previews) >= MAX_PREVIEW_IMAGES:
-                image_limit_hit = True
-                break
-            if lookups_attempted >= MAX_STOCK_LOOKUPS:
-                lookup_limit_hit = True
-                break
-            if time.monotonic() - started >= MAX_SEARCH_SECONDS:
-                time_limit_hit = True
-                break
-            lookups_attempted += 1
-            try:
-                photo = provider.find(plan.search, subject=plan.heading, generate=False)
-            except Exception as exc:
-                warnings.append(f"{chapter_filename}: image search failed for '{plan.heading}' ({type(exc).__name__}).")
-                photo = None
-            if not photo:
-                warnings.append(f"{chapter_filename}: no suitable image found for '{plan.heading}'.")
-                continue
-            idx = len(previews)
-            package.writestr(f"images/{idx}.jpg", photo.payload)
-            details = {
-                "id": idx, "chapter_index": chapter_index, "chapter": chapter_filename,
+    while cursor < len(pending):
+        if len(manifest["previews"]) >= MAX_TOTAL_IMAGES:
+            break
+        if len(manifest["previews"]) - initial_count >= MAX_PREVIEW_IMAGES:
+            break
+        if searches_this_batch >= MAX_STOCK_LOOKUPS:
+            break
+        if time.monotonic() - started >= MAX_SEARCH_SECONDS:
+            break
+        entry = pending[cursor]
+        plan = ImagePlan(**entry["plan"])
+        chapter_index = entry["chapter_index"]
+        chapter = entry["chapter"]
+        cursor += 1  # An unsuccessful lookup is still completed; never re-charge it.
+        searches_this_batch += 1
+        try:
+            photo = provider.find(plan.search, subject=plan.heading, generate=False)
+        except Exception as exc:
+            manifest["warnings"].append(f"{chapter}: image search failed for '{plan.heading}' ({type(exc).__name__}).")
+            photo = None
+        if photo is None:
+            manifest["warnings"].append(f"{chapter}: no suitable image found for '{plan.heading}'.")
+            manifest["missing_images"].append({
+                "chapter_index": chapter_index, "chapter": chapter,
                 "heading": plan.heading, "search": plan.search,
                 "intended_scene": plan.description,
-                "original_search": plan.search,
-                "plan": asdict(plan),
-                "source": photo.source, "source_url": photo.source_url,
-                "licence": photo.licence, "author": photo.author,
-                "reused": photo.reused, "identifier": photo.identifier,
-            }
-            previews.append(details)
-            images_acquired += 1
-        if image_limit_hit:
-            warnings.append(f"Image preview limit reached ({MAX_PREVIEW_IMAGES} per job). Remaining headings were skipped to control requests and costs.")
-        if lookup_limit_hit:
-            warnings.append(f"Stock-search limit reached ({MAX_STOCK_LOOKUPS} headings per job). Remaining headings were skipped to protect provider quotas.")
-        if time_limit_hit:
-            warnings.append(f"Search-time limit reached ({MAX_SEARCH_SECONDS} seconds per job). Remaining headings were skipped to prevent a stalled upload.")
-        if images_acquired == 0:
-            if not provider.pexels_key:
-                warnings.append("Pexels API is not configured. Add a free PEXELS_API_KEY in Railway for realistic stock photography.")
-            if not provider.pixabay_key:
-                warnings.append("Pixabay API is not configured. Add PIXABAY_API_KEY for an additional free source.")
-            if provider.openverse_enabled and not provider.pexels_key and not provider.pixabay_key:
-                warnings.append("Only public-domain Openverse is configured; its limited photo catalogue may not cover abstract workplace topics.")
-            if not provider.pexels_key and not provider.pixabay_key and not provider.openverse_enabled:
-                warnings.append("No free photo API is enabled for this job. Freepik stock may have reached its paid request budget.")
-        report = {
-            "original_filename": filename, "course_name": course_name,
-            "chapters": names, "previews": previews,
-            "image_source": image_source, "reuse_existing": reuse_existing,
-            "image_library_hits": provider.library_hits,
-            "freepik_stock_downloads": provider.freepik_downloads,
-            "freepik_search_attempts": provider.freepik_attempts,
-            "freepik_enabled": allow_freepik,
-            "generation_attempts": 0, "images_found": images_acquired,
-            "free_replacements_used": 0,
-            "eligible_headings": eligible_total,
-            "planned_image_positions": len(pending),
-            "stock_lookups_attempted": lookups_attempted,
-            "matching_policy": "Course title + chapter context + individual heading; stock tags are suggestions, not visual verification.",
-            "provider_attempts": provider.provider_attempts,
-            "provider_successes": provider.provider_successes,
-            "missing_images": [
-                {"chapter": filename_, "heading": planned.heading, "search": planned.search,
-                 "intended_scene": planned.description,
-                 "pexels_url": planned.pexels_link, "stocksnap_url": planned.stocksnap_link,
-                 "pixabay_url": planned.pixabay_link}
-                for _, filename_, planned in pending[:lookups_attempted][:60]
-                if not any(x["chapter"] == filename_ and x["heading"] == planned.heading for x in previews)
-            ],
-            "warnings": list(dict.fromkeys(warnings + provider.warnings)),
-            "providers_configured": {
-                "pexels": bool(provider.pexels_key), "pixabay": bool(provider.pixabay_key),
-                "openverse": provider.openverse_enabled, "freepik": bool(provider.freepik_key),
-            },
-        }
-        package.writestr("review.json", json.dumps(report, ensure_ascii=False).encode("utf-8"))
-    # Do not put photo bytes or document content in the public job report.
-    public_report = {k: v for k, v in report.items() if k != "previews"}
-    public_report["previews"] = [
-        {k: v for k, v in item.items() if k not in {"plan", "identifier", "original_search"}} for item in previews
+                "pexels_url": plan.pexels_link,
+                "stocksnap_url": plan.stocksnap_link,
+                "pixabay_url": plan.pixabay_link,
+            })
+            continue
+        image_id = len(manifest["previews"])
+        files[f"images/{image_id}.jpg"] = photo.payload
+        manifest["previews"].append({
+            "id": image_id, "chapter_index": chapter_index, "chapter": chapter,
+            "heading": plan.heading, "search": plan.search,
+            "intended_scene": plan.description, "original_search": plan.search,
+            "plan": asdict(plan), "source": photo.source,
+            "source_url": photo.source_url, "licence": photo.licence,
+            "author": photo.author, "reused": photo.reused,
+            "identifier": photo.identifier,
+        })
+
+    manifest["next_plan_index"] = cursor
+    manifest["batch_count"] = int(manifest.get("batch_count", 0)) + 1
+    manifest["stock_lookups_attempted"] = int(manifest.get("stock_lookups_attempted", 0)) + searches_this_batch
+    manifest["image_library_hits"] = int(manifest.get("image_library_hits", 0)) + provider.library_hits
+    manifest["freepik_stock_downloads"] = provider.freepik_downloads
+    manifest["freepik_search_attempts"] = provider.freepik_attempts
+    for source, count in provider.provider_attempts.items():
+        manifest["provider_attempts"][source] = manifest["provider_attempts"].get(source, 0) + count
+    for source, count in provider.provider_successes.items():
+        manifest["provider_successes"][source] = manifest["provider_successes"].get(source, 0) + count
+    manifest["warnings"].extend(provider.warnings)
+    _update_progress(manifest)
+    if manifest["has_more"]:
+        manifest["warnings"].append(
+            f"Image preview limit reached for this search batch (up to {MAX_PREVIEW_IMAGES} images, "
+            f"{MAX_STOCK_LOOKUPS} searches or {MAX_SEARCH_SECONDS} seconds). "
+            "Choose 'Find next batch' to continue from the next heading; earlier searches are retained."
+        )
+    elif manifest["remaining_positions"] > 0:
+        manifest["warnings"].append(
+            f"Maximum {MAX_TOTAL_IMAGES} images reached for this review. Start a new review to change coverage."
+        )
+    if not manifest["previews"]:
+        if not provider.pexels_key:
+            manifest["warnings"].append("Pexels API is not configured. Add a free PEXELS_API_KEY in Railway for realistic stock photography.")
+        if not provider.pixabay_key:
+            manifest["warnings"].append("Pixabay API is not configured. Add PIXABAY_API_KEY for an additional free source.")
+        if provider.openverse_enabled and not provider.pexels_key and not provider.pixabay_key:
+            manifest["warnings"].append("Only public-domain Openverse is configured; its limited photo catalogue may not cover abstract workplace topics.")
+    manifest["warnings"] = list(dict.fromkeys(manifest["warnings"]))
+
+
+def _public_details(manifest: dict) -> dict:
+    private_keys = {"pending_plans", "chapter_overviews"}
+    public = {key: value for key, value in manifest.items() if key not in private_keys and key != "previews"}
+    public["previews"] = [
+        {key: value for key, value in item.items() if key not in {"plan", "identifier", "original_search"}}
+        for item in manifest["previews"]
     ]
-    return PreviewBundle(out.getvalue(), public_report)
+    return public
+
+
+def _pack_files(files: dict[str, bytes], manifest: dict) -> PreviewBundle:
+    files["review.json"] = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as package:
+        for name, contents in files.items():
+            package.writestr(name, contents)
+    return PreviewBundle(output.getvalue(), _public_details(manifest))
+
+
+def make_image_preview(
+    raw: bytes, filename: str, *, course_name: str = "", image_source: str = "mixed",
+    reuse_existing: bool = True, use_openrouter: bool = False, allow_freepik: bool = False,
+    images_per_chapter: int = 2, provider: Provider | None = None,
+) -> PreviewBundle:
+    if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik"}:
+        raise CourseImagesError("Invalid stock-image source.")
+    if not 1 <= images_per_chapter <= 5:
+        raise CourseImagesError("Choose between 1 and 5 images per chapter.")
+    chapters, _ = _read_chapters(raw, filename)
+    manifest = {
+        "original_filename": filename, "course_name": course_name,
+        "chapters": [chapter.filename for chapter in chapters],
+        "chapter_paths": [chapter.relative_path or chapter.filename for chapter in chapters],
+        "eligible_by_chapter": [], "chapter_overviews": [],
+        "previews": [], "pending_plans": [], "next_plan_index": 0,
+        "image_source": image_source, "reuse_existing": reuse_existing,
+        "use_openrouter": use_openrouter, "images_per_chapter": images_per_chapter,
+        "image_library_hits": 0, "freepik_stock_downloads": 0,
+        "freepik_search_attempts": 0, "freepik_enabled": allow_freepik,
+        "generation_attempts": 0, "free_replacements_used": 0,
+        "stock_lookups_attempted": 0, "batch_count": 0, "missing_images": [],
+        "matching_policy": "Course title + chapter context + individual heading; stock tags are suggestions, not visual verification.",
+        "provider_attempts": {"Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0},
+        "provider_successes": {"Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0},
+        "warnings": [], "providers_configured": {},
+    }
+    files: dict[str, bytes] = {}
+    if Path(filename).suffix.lower() == ".zip":
+        # Keep the original ZIP privately for exact relative paths and untouched
+        # assignment briefs, covers and other course assets at confirmation.
+        files["original_upload.zip"] = raw
+    chapter_plans: list[list[dict]] = []
+    eligible_total = 0
+    for index, chapter in enumerate(chapters):
+        files[f"documents/{index}.docx"] = chapter.payload
+        chapter_plans.append([])
+        manifest["chapter_overviews"].append("")
+        manifest["eligible_by_chapter"].append(0)
+        try:
+            doc = Document(BytesIO(chapter.payload))
+            plans, eligible = _plans(doc, f"{course_name} {chapter.title}")
+            manifest["chapter_overviews"][index] = _chapter_overview(doc)
+            manifest["eligible_by_chapter"][index] = eligible
+            eligible_total += eligible
+            chosen = _balanced_plans(plans, images_per_chapter) if Path(filename).suffix.lower() == ".zip" else plans
+            chapter_plans[index] = [
+                {"chapter_index": index, "chapter": manifest["chapter_paths"][index], "plan": asdict(plan)}
+                for plan in chosen
+            ]
+        except Exception as exc:
+            manifest["warnings"].append(f"{manifest['chapter_paths'][index]}: cannot plan images ({type(exc).__name__}); original will be preserved.")
+    # The same round-robin is used for every follow-up search: early chapters
+    # cannot consume all requests while later chapters remain unsearched.
+    for position in range(max((len(group) for group in chapter_plans), default=0)):
+        for group in chapter_plans:
+            if position < len(group):
+                manifest["pending_plans"].append(group[position])
+    manifest["eligible_headings"] = eligible_total
+    configured = _provider_for_review(manifest, provider)
+    manifest["providers_configured"] = {
+        "pexels": bool(configured.pexels_key), "pixabay": bool(configured.pixabay_key),
+        "openverse": configured.openverse_enabled, "freepik": bool(configured.freepik_key),
+    }
+    _run_search_batch(manifest, files, configured)
+    return _pack_files(files, manifest)
+
+
+def continue_image_preview(preview_bundle: bytes, *, provider: Provider | None = None) -> PreviewBundle:
+    """Perform the next bounded batch without repeating searches or losing choices."""
+    try:
+        with zipfile.ZipFile(BytesIO(preview_bundle)) as archive:
+            manifest = _load_manifest(archive)
+            if not manifest.get("pending_plans"):
+                raise CourseImagesError("This review does not support continuation; start a new preview.")
+            if not manifest.get("has_more"):
+                raise CourseImagesError("All planned headings have been searched for this review.")
+            files = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/") and name != "review.json"}
+    except (zipfile.BadZipFile, KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, CourseImagesError):
+            raise
+        raise CourseImagesError("The review archive is invalid. Start a new review.") from exc
+    configured = _provider_for_review(manifest, provider)
+    _run_search_batch(manifest, files, configured)
+    return _pack_files(files, manifest)
 
 
 def replace_with_free_image(
@@ -246,12 +350,7 @@ def replace_with_free_image(
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
         for name, raw in files.items():
             target.writestr(name, raw)
-    public = {key: value for key, value in manifest.items() if key != "previews"}
-    public["previews"] = [
-        {key: value for key, value in value.items() if key not in {"plan", "identifier", "original_search"}}
-        for value in previews
-    ]
-    return PreviewBundle(output.getvalue(), public)
+    return PreviewBundle(output.getvalue(), _public_details(manifest))
 
 
 def _load_manifest(package: zipfile.ZipFile) -> dict:
@@ -280,8 +379,98 @@ def preview_jpeg(preview_bundle: bytes, image_id: int) -> bytes:
         raise CourseImagesError("The preview archive is corrupt.") from exc
 
 
+
+
+def _csv_value(value: object) -> str:
+    """Avoid CSV formula injection from untrusted archive paths and headings."""
+    text = str(value or "")
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) else text
+
+
+def _report_csv(rows: list[dict], sources: list[dict], missing: list[dict], warnings: list[str]) -> bytes:
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Document path", "Status", "Eligible headings", "Planned images",
+                     "Photos found", "Approved images", "Inserted images", "Message"])
+    for item in rows:
+        writer.writerow([_csv_value(item.get(key, "")) for key in (
+            "path", "status", "eligible", "planned", "found", "approved", "inserted", "message"
+        )])
+    writer.writerow([])
+    writer.writerow(["Approved photographs and licence details"])
+    writer.writerow(["Chapter", "Heading", "Source provider", "Licence", "Photographer", "Source URL"])
+    for item in sources:
+        writer.writerow([_csv_value(item.get(key, "")) for key in (
+            "chapter", "heading", "provider", "licence", "author", "source_url"
+        )])
+    writer.writerow([])
+    writer.writerow(["Searched headings without a matching photo"])
+    writer.writerow(["Chapter", "Heading", "Suggested search words"])
+    for item in missing:
+        writer.writerow([_csv_value(item.get(key, "")) for key in ("chapter", "heading", "search")])
+    if warnings:
+        writer.writerow([])
+        writer.writerow(["Processing notices"])
+        for message in warnings:
+            writer.writerow([_csv_value(message)])
+    return output.getvalue().encode("utf-8-sig")
+
+
+def _copy_original_zip(original: bytes, enhanced: dict[str, bytes], output: zipfile.ZipFile,
+                       warnings: list[str]) -> tuple[int, str]:
+    """Keep safe original folder paths, untouched course assets and skipped DOCX."""
+    used: set[str] = set()
+    files_written = 0
+    uncompressed = 0
+    with zipfile.ZipFile(BytesIO(original)) as source:
+        if len(source.infolist()) > MAX_ARCHIVE_FILES:
+            raise CourseImagesError("The source ZIP contains too many files.")
+        for info in source.infolist():
+            raw_name = normalise_zip_name(info.filename)
+            if info.is_dir():
+                continue
+            if not safe_zip_member(info.filename):
+                warnings.append(f"Unsafe ZIP entry omitted: {info.filename[:120]}")
+                continue
+            if stat.S_IFMT(info.external_attr >> 16) == stat.S_IFLNK:
+                warnings.append(f"Symbolic link omitted from ZIP: {raw_name[:120]}")
+                continue
+            if raw_name.lower() in used:
+                warnings.append(f"Duplicate ZIP path omitted: {raw_name[:120]}")
+                continue
+            if info.file_size > MAX_DOCUMENT_BYTES:
+                warnings.append(f"Oversized ZIP entry omitted: {raw_name[:120]}")
+                continue
+            if uncompressed + info.file_size > MAX_ARCHIVE_BYTES:
+                raise CourseImagesError("The ZIP's uncompressed content exceeds the safe limit.")
+            used.add(raw_name.lower())
+            uncompressed += info.file_size
+            try:
+                data = enhanced.get(raw_name)
+                if data is None:
+                    data = source.read(info)
+            except (zipfile.BadZipFile, RuntimeError, OSError, ValueError) as exc:
+                warnings.append(f"Could not copy ZIP entry {raw_name[:120]} ({type(exc).__name__}).")
+                continue
+            output.writestr(raw_name, data)
+            files_written += 1
+    # Ensures a report does not overwrite or duplicate an input file.
+    report_base = "SLC_Image_Insertion_Report.csv"
+    report_name = report_base
+    count = 2
+    while report_name.lower() in used:
+        report_name = f"SLC_Image_Insertion_Report_{count}.csv"
+        count += 1
+    return files_written, report_name
+
+
 def finish_image_preview(preview_bundle: bytes, selected_ids: list[int]) -> CourseImagesResult:
-    if len(selected_ids) > MAX_PREVIEW_IMAGES or len(selected_ids) != len(set(selected_ids)):
+    """Insert only approved photos; preserve exact input ZIP paths and other files.
+
+    A malformed chapter cannot destroy the batch: its original DOCX is copied
+    unchanged and its failure is included in the batch report.
+    """
+    if len(selected_ids) > MAX_TOTAL_IMAGES or len(selected_ids) != len(set(selected_ids)):
         raise CourseImagesError("The selected image list is invalid.")
     try:
         with zipfile.ZipFile(BytesIO(preview_bundle)) as archive:
@@ -290,53 +479,88 @@ def finish_image_preview(preview_bundle: bytes, selected_ids: list[int]) -> Cour
             if any(type(i) is not int or i < 0 or i >= len(found) for i in selected_ids):
                 raise CourseImagesError("One or more selected image IDs are invalid.")
             selected = set(selected_ids)
-            enhanced: list[tuple[str, bytes]] = []
+            enhanced: dict[str, bytes] = {}
             sources: list[dict] = []
             approved_for_cache: list[tuple[str, str, SavedImage]] = []
+            warnings = list(manifest.get("warnings", []))
             inserted = 0
+            documents_updated = 0
+            documents_failed = 0
+            chapter_rows: list[dict] = []
+            paths = manifest.get("chapter_paths", manifest["chapters"])
+            chapter_progress = manifest.get("chapter_progress", [])
             for chapter_index, chapter_filename in enumerate(manifest["chapters"]):
+                path = paths[chapter_index]
                 original = archive.read(f"documents/{chapter_index}.docx")
-                doc = Document(BytesIO(original))
-                plans = []
-                pictures = {}
-                for item in found:
-                    if item.get("chapter_index") != chapter_index or item.get("id") not in selected:
-                        continue
-                    plan = ImagePlan(**item["plan"])
-                    image_bytes = archive.read(f"images/{item['id']}.jpg")
-                    photos = Picture(image_bytes, item["source"], item.get("source_url", ""),
-                                     identifier=item.get("identifier", ""),
-                                     licence=item.get("licence", ""), author=item.get("author", ""),
-                                     reused=bool(item.get("reused")))
-                    if not (0 <= plan.paragraph_index < len(doc.paragraphs)) or " ".join(doc.paragraphs[plan.paragraph_index].text.split()) != plan.heading:
-                        raise CourseImagesError("A heading changed since preview. Please run a fresh preview.")
-                    plans.append(plan)
-                    pictures[plan.paragraph_index] = photos
-                    sources.append({"chapter": chapter_filename, "heading": plan.heading,
-                                    "provider": photos.source, "source_url": photos.source_url,
-                                    "licence": photos.licence, "author": photos.author,
-                                    "reused": photos.reused})
-                    if manifest.get("reuse_existing", True):
-                        approved_for_cache.append((
-                            item.get("original_search", plan.search), plan.heading,
-                            SavedImage(photos.payload, photos.source, photos.source_url,
-                                       photos.identifier, photos.licence, photos.author),
-                        ))
-                original_picture_count = len(doc.inline_shapes)
-                revised = _insert_images(doc, plans, pictures) if pictures else original
-                # Verify saved DOCX rather than only the insertion code's intention.
-                result_doc = Document(BytesIO(revised))
-                if len(result_doc.inline_shapes) < original_picture_count + len(pictures):
-                    raise CourseImagesError("Some images were not embedded in the saved Word file.")
-                inserted += len(pictures)
-                enhanced.append((f"{Path(chapter_filename).stem}_with_images.docx", revised))
+                chosen = [item for item in found if item.get("chapter_index") == chapter_index
+                          and item.get("id") in selected]
+                counters = chapter_progress[chapter_index] if chapter_index < len(chapter_progress) else {}
+                row = {
+                    "path": path, "eligible": counters.get("eligible", 0),
+                    "planned": counters.get("planned", 0),
+                    "found": counters.get("found", 0),
+                    "approved": len(chosen), "inserted": 0,
+                    "status": "Unchanged", "message": "No photographs approved",
+                }
+                revised = original
+                if chosen:
+                    try:
+                        doc = Document(BytesIO(original))
+                        plans = []
+                        pictures = {}
+                        for item in chosen:
+                            plan = ImagePlan(**item["plan"])
+                            if (plan.paragraph_index < 0 or plan.paragraph_index >= len(doc.paragraphs)
+                                or " ".join(doc.paragraphs[plan.paragraph_index].text.split()) != plan.heading):
+                                raise CourseImagesError("A planned heading could not be verified in the original Word document.")
+                            pictures[plan.paragraph_index] = Picture(
+                                archive.read(f"images/{item['id']}.jpg"), item["source"],
+                                item.get("source_url", ""), identifier=item.get("identifier", ""),
+                                licence=item.get("licence", ""), author=item.get("author", ""),
+                                reused=bool(item.get("reused")),
+                            )
+                            plans.append(plan)
+                        prior_shapes = len(doc.inline_shapes)
+                        revised = _insert_images(doc, plans, pictures)
+                        if len(Document(BytesIO(revised)).inline_shapes) < prior_shapes + len(pictures):
+                            raise CourseImagesError("Some images were not embedded in the saved Word document.")
+                        row["status"] = "Updated"
+                        row["inserted"] = len(pictures)
+                        row["message"] = "Approved images embedded"
+                        inserted += len(pictures)
+                        documents_updated += 1
+                        for item in chosen:
+                            photo = pictures[item["plan"]["paragraph_index"]]
+                            sources.append({
+                                "chapter": path, "heading": item["heading"],
+                                "provider": photo.source, "source_url": photo.source_url,
+                                "licence": photo.licence, "author": photo.author,
+                                "reused": photo.reused,
+                            })
+                            if manifest.get("reuse_existing", True):
+                                approved_for_cache.append((
+                                    item.get("original_search", item["search"]), item["heading"],
+                                    SavedImage(photo.payload, photo.source, photo.source_url,
+                                               photo.identifier, photo.licence, photo.author),
+                                ))
+                    except Exception as exc:
+                        # Prefer a completely untouched chapter to a partially
+                        # modified DOCX; continue processing the rest of the ZIP.
+                        revised = original
+                        row["status"] = "Failed – original preserved"
+                        row["message"] = f"Image insertion failed ({type(exc).__name__})"
+                        warnings.append(f"{path}: {row['message']}; original chapter retained.")
+                        documents_failed += 1
+                enhanced[path] = revised
+                chapter_rows.append(row)
+            original_zip = archive.read("original_upload.zip") if "original_upload.zip" in archive.namelist() else None
     except (zipfile.BadZipFile, KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, CourseImagesError):
             raise
         raise CourseImagesError("The preview could not be finalised; create a new preview.") from exc
 
-    # Approve cache writes only after all selected pictures were confirmed in
-    # the finished DOCX, never merely because search returned a candidate.
+    # Cache only verified successful insertions. In particular, rejected
+    # proposals or pictures for failed chapters are never cached.
     if approved_for_cache:
         library = ImageLibrary()
         for search, heading, item in approved_for_cache:
@@ -344,31 +568,39 @@ def finish_image_preview(preview_bundle: bytes, selected_ids: list[int]) -> Cour
 
     report = {
         "mode": "insert", "image_source": manifest.get("image_source", "mixed"),
-        "chapters_processed": len(enhanced), "documents_with_images": len(enhanced),
+        "chapters_processed": len(enhanced), "documents_with_images": documents_updated,
+        "documents_unchanged": len(enhanced) - documents_updated - documents_failed,
+        "documents_failed": documents_failed,
         "photos_inserted": inserted, "images_skipped_by_user": len(found) - len(selected),
         "images_previewed": len(found), "guides_created": 0, "covers_prepared": 0,
+        "chapter_results": chapter_rows,
         "image_sources": sources, "image_library_hits": manifest.get("image_library_hits", 0),
         "freepik_stock_downloads": manifest.get("freepik_stock_downloads", 0),
         "freepik_search_attempts": manifest.get("freepik_search_attempts", 0),
         "freepik_enabled": manifest.get("freepik_enabled", False),
         "free_replacements_used": manifest.get("free_replacements_used", 0),
-        "generation_attempts": 0, "warnings": manifest.get("warnings", []),
+        "generation_attempts": 0, "warnings": list(dict.fromkeys(warnings)),
         "reuse_existing": manifest.get("reuse_existing", True),
     }
     filename = manifest["original_filename"]
     if Path(filename).suffix.lower() == ".docx":
         report["output_format"] = "docx"
-        return CourseImagesResult(_safe_name(enhanced[0][0]), enhanced[0][1], report)
-    out = BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
-        used_names = set()
-        for name, raw in enhanced:
-            path = _safe_name(name)
-            counter = 2
-            while path.lower() in used_names:
-                path = f"{Path(name).stem}_{counter}.docx"
-                counter += 1
-            used_names.add(path.lower())
-            package.writestr(path, raw)
+        return CourseImagesResult(
+            _safe_name(f"{Path(filename).stem}_with_images.docx"), next(iter(enhanced.values())), report
+        )
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as package:
+        if original_zip is None:
+            for path, data in enhanced.items():
+                package.writestr(path, data)
+            report_name = "SLC_Image_Insertion_Report.csv"
+        else:
+            _, report_name = _copy_original_zip(original_zip, enhanced, package, report["warnings"])
+        package.writestr(report_name, _report_csv(chapter_rows, sources, manifest.get("missing_images", []), report["warnings"]))
+    report["warnings"] = list(dict.fromkeys(report["warnings"]))
     report["output_format"] = "zip"
-    return CourseImagesResult(_safe_name(manifest.get("course_name") or Path(filename).stem) + "_Documents_With_Images.zip", out.getvalue(), report)
+    report["report_filename"] = report_name
+    return CourseImagesResult(
+        _safe_name(manifest.get("course_name") or Path(filename).stem) + "_Documents_With_Images.zip",
+        output.getvalue(), report,
+    )

@@ -47,7 +47,7 @@ class CleanSpacingRequest(BaseModel):
 
 
 class ConfirmCourseImagePreviewRequest(BaseModel):
-    selected_ids: list[int] = Field(default_factory=list, max_length=60)
+    selected_ids: list[int] = Field(default_factory=list, max_length=120)
 
 
 class ReplaceCourseImagePreviewRequest(BaseModel):

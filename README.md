@@ -51,23 +51,23 @@ The original formatting engine has been extracted from Streamlit and reused by F
 - DOCX or ZIP input from the same formatter screen.
 - Word-compatible full-page cover layout: stale Letter-size drawing metadata is removed, the background is page-relative with a small bleed, and both modern/legacy textbox representations are aligned to the actual A4 section size.
 
-### Find & Add Images — v28 context-aware, credit-safe workflow
+### Find & Add Images — v29 course ZIP batch review (v28 context-aware matching retained)
 
 **Defaults:** `image_source=mixed`, `reuse_existing=true`, `preview_images=true`, `allow_freepik=false`, `use_openrouter=false`. Mixed mode works with only free sources and the stored image library until you explicitly enable Freepik stock; paid **AI image generation is disabled** throughout this workflow.
 
 1. Upload a single DOCX or a ZIP of chapter DOCX files.
 2. Click **Find images and preview**. The backend checks its saved image library and then tries **Pexels → Pixabay → Openverse** (CC0/public-domain Wikimedia-hosted photos). Without the separate opt-in, **zero Freepik calls** are made. If explicitly enabled, Freepik stock is limited to **one search attempt and one successful download** by default, even when the attempt fails.
-3. See image thumbnails, intended photographic scene, exact chapter/heading placement, origin, licence and photographer. Every photo starts **unchecked**: actively approve only genuinely relevant pictures, or use **Find free alternative** to retry one photograph with better search words (free providers only, up to eight successful replacements per review). The app searches chapter plans in a balanced order, so large ZIPs do not use their entire preview allowance on the first chapter.
+3. For a ZIP, choose 1–5 target images per chapter (2 by default), review each chapter in an expandable panel, and continue with **Find next batch** as required. See image thumbnails, intended photographic scene, exact chapter/heading placement, origin, licence and photographer. Every photo starts **unchecked**: actively approve only genuinely relevant pictures, or use **Find free alternative** to retry one photograph with better search words (free providers only, up to eight successful replacements per review). The app searches chapter plans in a balanced order, so large ZIPs do not use their entire preview allowance on the first chapter.
 4. Click **Insert selected images and download**. This step uses already acquired bytes, so it makes **no further stock-provider calls**. The DOCX retains all original paragraph text, styles and headings; adding pictures may change page flow. Existing illustrations and Summary/References/Contents headings are skipped.
-5. A single DOCX returns a single DOCX. A ZIP returns a ZIP containing edited chapter DOCX files.
+5. A single DOCX returns a single DOCX. A ZIP preserves its original Word filenames, nested folders and safe non-chapter assets, plus a `SLC_Image_Insertion_Report.csv` summary with approved photo sources and licences. Failed chapters are retained unchanged. Browser-tab review selections can be restored after refresh while the backend preview bundle remains available.
 
 **Saved library:** free-stock JPEGs are cached in the app's existing S3-compatible bucket (`S3_*`) or local `STORAGE_DIR`, keyed to the search and heading. Repeated matching jobs can reuse them instead of making more API requests. For Railway redeploy persistence, configure an S3 bucket; `/tmp` is ephemeral. Freepik licensed stock is **not** cached by default because reuse rights vary by licence. Pixabay search responses are cached for 24 hours as required by Pixabay API terms. No original Word content is stored in the image library (originals for a preview stay in a separate private review bundle).
 
-**Setup:** add `PEXELS_API_KEY` and `PIXABAY_API_KEY` in Railway backend Variables, optionally `FREEPIK_API_KEY` or `MAGNIFIC_API_KEY`; `OPENVERSE_ENABLED=true` requires no key. Use `COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=1`, `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=1`, `COURSE_IMAGE_MAX_PREVIEW_IMAGES=16`, `COURSE_IMAGE_MAX_STOCK_LOOKUPS=32`, and `COURSE_IMAGE_MAX_SEARCH_SECONDS=75` initially. Set `NEXT_PUBLIC_API_URL` in Vercel and add the Vercel origin to backend `ALLOWED_ORIGINS`. Keys stay server-side. Rebuild/redeploy **both Railway and Vercel** for v26.
+**Setup:** add `PEXELS_API_KEY` and `PIXABAY_API_KEY` in Railway backend Variables, optionally `FREEPIK_API_KEY` or `MAGNIFIC_API_KEY`; `OPENVERSE_ENABLED=true` requires no key. Use `COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=1`, `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=1`, `COURSE_IMAGE_MAX_PREVIEW_IMAGES=16` (per batch), `COURSE_IMAGE_MAX_TOTAL_PREVIEW_IMAGES=80` (per review), `COURSE_IMAGE_MAX_STOCK_LOOKUPS=32`, and `COURSE_IMAGE_MAX_SEARCH_SECONDS=75` initially. Set `NEXT_PUBLIC_API_URL` in Vercel and add the Vercel origin to backend `ALLOWED_ORIGINS`. Keys stay server-side. Rebuild/redeploy **both Railway and Vercel** for v26.
 
 **Other modes:** `free` (never touches Freepik), `pexels`, `pixabay`, `openverse`, and `freepik`. Optional OpenRouter text-only scene refinement is off by default. The guides-and-covers workflow still works without modifying the original documents. Some images or source sites may be unavailable and are skipped with warnings. Users should verify actual image relevance, stock rights and attribution before publishing.
 
-For API details and provider limitations, see `docs/FREE_FIRST_IMAGE_WORKFLOW.md`.
+For the new ZIP interface, resume endpoint, report and deployment notes see `RELEASE_V29.md`. For provider limitations, see `docs/FREE_FIRST_IMAGE_WORKFLOW.md`.
 
 ## ZIP batch formatting
 

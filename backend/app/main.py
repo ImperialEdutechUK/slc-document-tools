@@ -49,11 +49,11 @@ from .services.batch_formatter import BatchFormatterError, format_zip_batch
 from .services.storage import StorageError, StorageNotFoundError, storage
 from .services.word_to_pdf import WordToPdfError, convert_word_files
 from .services.course_images import CourseImagesError, build_course_image_package
-from .services.course_image_review import make_image_preview, finish_image_preview, preview_jpeg, replace_with_free_image
+from .services.course_image_review import (make_image_preview, continue_image_preview, finish_image_preview, preview_jpeg, replace_with_free_image)
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.03-v28-course-heading-context-relevance"
+BUILD_VERSION = "2026.11.05-v29-zip-batch-image-review"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -361,6 +361,7 @@ async def review_course_images(
     reuse_existing: Annotated[bool, Form()] = True,
     allow_freepik: Annotated[bool, Form()] = False,
     use_openrouter: Annotated[bool, Form()] = False,
+    images_per_chapter: Annotated[int, Form(ge=1, le=5)] = 2,
     db: Session = Depends(get_db),
 ) -> JobResponse:
     """Find stock photos once; retain private preview bundle for later confirmation."""
@@ -374,11 +375,12 @@ async def review_course_images(
         raw = await document.read()
         if len(raw) > 90 * 1024 * 1024:
             raise CourseImagesError("Upload exceeds the 90 MB limit.")
-        result = await run_in_threadpool(
-            make_image_preview, raw, filename, course_name=course_name,
-            image_source=image_source, reuse_existing=reuse_existing,
-            use_openrouter=use_openrouter, allow_freepik=allow_freepik,
-        )
+        options = dict(course_name=course_name, image_source=image_source,
+                       reuse_existing=reuse_existing, use_openrouter=use_openrouter,
+                       allow_freepik=allow_freepik)
+        if filename.lower().endswith(".zip"):
+            options["images_per_chapter"] = images_per_chapter
+        result = await run_in_threadpool(make_image_preview, raw, filename, **options)
         details = result.details
         details["build"] = BUILD_VERSION
         details["previews"] = [
@@ -401,6 +403,52 @@ async def review_course_images(
         _fail_job(db, job, exc)
         logger.exception("Course image preview failed")
         raise HTTPException(status_code=500, detail="Unable to prepare image previews.") from exc
+
+
+@app.get(f"{API_PREFIX}/course-images/reviews/{{job_id}}", response_model=JobResponse)
+def get_course_image_review(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    """Recover an existing private review after a page refresh without another stock search."""
+    job = db.get(Job, job_id)
+    if not job or job.job_type != "course_images_preview" or job.status != "completed" or not job.output_key:
+        raise HTTPException(status_code=404, detail="Image review not found. Start a new search.")
+    result = _job_response(job)
+    result.status = "review_ready"
+    result.download_url = None
+    result.output_filename = None
+    return result
+
+
+@app.post(f"{API_PREFIX}/course-images/reviews/{{job_id}}/continue", response_model=JobResponse)
+async def continue_course_image_review(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
+    """Find the next capped group of photos, retaining the complete prior review."""
+    job = db.get(Job, job_id)
+    if not job or job.job_type != "course_images_preview" or job.status != "completed" or not job.output_key:
+        raise HTTPException(status_code=404, detail="Image review not found. Start a new search.")
+    try:
+        existing = storage.get_bytes(job.output_key)
+        changed = await run_in_threadpool(continue_image_preview, existing)
+        details = changed.details
+        details["build"] = BUILD_VERSION
+        revision = details.get("batch_count", 0) + details.get("free_replacements_used", 0)
+        details["previews"] = [
+            {**item, "preview_url": f"{API_PREFIX}/course-images/reviews/{job_id}/images/{item['id']}?v={revision}"}
+            for item in details["previews"]
+        ]
+        storage.put_bytes(job.output_key, changed.payload, "application/zip")
+        job.meta_json = json.dumps(details, ensure_ascii=False)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        response = _job_response(job)
+        response.status = "review_ready"
+        response.download_url = None
+        response.output_filename = None
+        return response
+    except (CourseImagesError, StorageError) as exc:
+        raise HTTPException(status_code=422 if isinstance(exc, CourseImagesError) else 503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Continuing course image review failed")
+        raise HTTPException(status_code=500, detail="Unable to continue searching; previous review is still available.") from exc
 
 
 @app.get(f"{API_PREFIX}/course-images/reviews/{{job_id}}/images/{{image_id}}")

@@ -1915,6 +1915,7 @@ function FormatterPanel() {
 
 type CourseImageCandidate = {
   id: number;
+  chapter_index: number;
   chapter: string;
   heading: string;
   search: string;
@@ -1927,6 +1928,19 @@ type CourseImageCandidate = {
   preview_url: string;
 };
 
+type ZipChapterProgress = {
+  index: number;
+  name: string;
+  path: string;
+  eligible: number;
+  planned: number;
+  searched: number;
+  found: number;
+};
+
+const IMAGE_REVIEW_SESSION_KEY = "slc-image-review-job";
+const IMAGE_REVIEW_SELECTION_KEY = "slc-image-review-selection";
+
 function CourseImagesPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [coverFile, setCoverFile] = useState<File | null>(null);
@@ -1935,6 +1949,7 @@ function CourseImagesPanel() {
   const [imageSource, setImageSource] = useState<"mixed" | "free" | "pexels" | "pixabay" | "openverse" | "freepik">("mixed");
   const [reuseExisting, setReuseExisting] = useState(true);
   const [previewImages, setPreviewImages] = useState(true);
+  const [imagesPerChapter, setImagesPerChapter] = useState(2);
   const [allowFreepik, setAllowFreepik] = useState(false);
   const [useOpenrouter, setUseOpenrouter] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1944,6 +1959,41 @@ function CourseImagesPanel() {
   const [selectedImages, setSelectedImages] = useState<number[]>([]);
   const [replacementQueries, setReplacementQueries] = useState<Record<number, string>>({});
   const [replacingImage, setReplacingImage] = useState<number | null>(null);
+  const [expandedChapter, setExpandedChapter] = useState<number | null>(0);
+
+  // The review bundle lives in backend storage; only its opaque job ID and
+  // image selection are kept in this browser tab to recover after refresh.
+  useEffect(() => {
+    let active = true;
+    const storedId = sessionStorage.getItem(IMAGE_REVIEW_SESSION_KEY);
+    if (storedId) {
+      apiRequest(`/api/v1/course-images/reviews/${encodeURIComponent(storedId)}`, { method: "GET" })
+        .then((saved: JobResponse) => {
+          if (!active) return;
+          setReviewJob(saved);
+          try {
+            const selected = JSON.parse(sessionStorage.getItem(IMAGE_REVIEW_SELECTION_KEY) || "[]");
+            if (Array.isArray(selected)) {
+              const valid = new Set((saved.details?.previews || []).map((item: CourseImageCandidate) => item.id));
+              setSelectedImages(selected.filter((id): id is number => typeof id === "number" && valid.has(id)));
+            }
+          } catch { setSelectedImages([]); }
+        })
+        .catch(() => {
+          if (!active) return;
+          sessionStorage.removeItem(IMAGE_REVIEW_SESSION_KEY);
+          sessionStorage.removeItem(IMAGE_REVIEW_SELECTION_KEY);
+        });
+    }
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (reviewJob) {
+      sessionStorage.setItem(IMAGE_REVIEW_SESSION_KEY, reviewJob.id);
+      sessionStorage.setItem(IMAGE_REVIEW_SELECTION_KEY, JSON.stringify(selectedImages));
+    }
+  }, [reviewJob, selectedImages]);
 
   const imageSources = [
     { value: "mixed", label: "Free first, optional Freepik fallback", info: "Saved photos → Pexels → Pixabay → Openverse; paid stock only if you enable it below" },
@@ -1957,6 +2007,10 @@ function CourseImagesPanel() {
   const candidates: CourseImageCandidate[] = Array.isArray(reviewJob?.details?.previews)
     ? reviewJob!.details!.previews
     : [];
+  const chapterProgress: ZipChapterProgress[] = Array.isArray(reviewJob?.details?.chapter_progress)
+    ? reviewJob!.details!.chapter_progress
+    : [];
+  const isZipReview = (reviewJob?.original_filename || file?.name || "").toLowerCase().endsWith(".zip");
 
   function resetResults() {
     setJob(null);
@@ -1964,6 +2018,8 @@ function CourseImagesPanel() {
     setSelectedImages([]);
     setReplacementQueries({});
     setError("");
+    sessionStorage.removeItem(IMAGE_REVIEW_SESSION_KEY);
+    sessionStorage.removeItem(IMAGE_REVIEW_SELECTION_KEY);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1983,16 +2039,17 @@ function CourseImagesPanel() {
       form.append("allow_freepik", String(allowFreepik && (imageSource === "mixed" || imageSource === "freepik")));
       form.append("generate_missing", "false");
       form.append("use_openrouter", String(useOpenrouter));
+      form.append("images_per_chapter", String(imagesPerChapter));
       if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
-      if (mode === "insert" && previewImages) {
+      if (mode === "insert" && (previewImages || file.name.toLowerCase().endsWith(".zip"))) {
         const result: JobResponse = await apiRequest("/api/v1/course-images/review", {
           method: "POST", body: form,
         });
-        const items: CourseImageCandidate[] = result.details?.previews || [];
         // No automatic approval: course relevance must be confirmed visually.
         setSelectedImages([]);
         setReplacementQueries({});
         setReviewJob(result);
+        setExpandedChapter(0);
       } else {
         const result = await apiRequest("/api/v1/course-images/prepare", {
           method: "POST", body: form,
@@ -2018,11 +2075,37 @@ function CourseImagesPanel() {
       });
       setJob(result);
       setReviewJob(null);
+      sessionStorage.removeItem(IMAGE_REVIEW_SESSION_KEY);
+      sessionStorage.removeItem(IMAGE_REVIEW_SELECTION_KEY);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Image insertion failed.");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function findNextImageBatch() {
+    if (!reviewJob || busy || replacingImage !== null || !reviewJob.details?.has_more) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result: JobResponse = await apiRequest(`/api/v1/course-images/reviews/${reviewJob.id}/continue`, {
+        method: "POST",
+      });
+      // The IDs of existing candidates never change, so explicit approvals remain.
+      setReviewJob(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not continue the image search.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function selectChapterImages(chapterIndex: number, approve: boolean) {
+    const ids = candidates.filter((image) => image.chapter_index === chapterIndex).map((image) => image.id);
+    setSelectedImages((current) => approve
+      ? Array.from(new Set([...current, ...ids]))
+      : current.filter((id) => !ids.includes(id)));
   }
 
   async function findFreeReplacement(image: CourseImageCandidate) {
@@ -2049,8 +2132,44 @@ function CourseImagesPanel() {
     }
   }
 
+  function renderCandidate(item: CourseImageCandidate) {
+    return (
+      <div className={`image-review-card ${selectedImages.includes(item.id) ? "selected" : ""}`} key={item.id}>
+        <img src={apiUrl(item.preview_url)} alt={`Suggested ${item.source} photograph for ${item.heading}`} loading="lazy" />
+        <span className="image-review-body">
+          <label className="image-review-heading"><input type="checkbox"
+            checked={selectedImages.includes(item.id)}
+            disabled={busy || replacingImage !== null}
+            onChange={(event) => setSelectedImages((current) => event.target.checked
+              ? Array.from(new Set([...current, item.id]))
+              : current.filter((id) => id !== item.id))} />
+            <strong>{item.heading}</strong>
+          </label>
+          {!isZipReview && <small>{item.chapter}</small>}
+          {item.intended_scene && <span className="image-scene-hint"><strong>Intended photograph: </strong>{item.intended_scene}</span>}
+          <small><strong>Stock search:</strong> {item.search}</small>
+          <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
+          {item.author && <small>Photo: {item.author}</small>}
+          {item.source_url?.startsWith("https://") && <a href={item.source_url} target="_blank" rel="noopener noreferrer">View source and licence</a>}
+          <span className="image-replace-controls">
+            <input aria-label={`Free photo search for ${item.heading}`}
+              value={replacementQueries[item.id] ?? item.search}
+              maxLength={110}
+              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); findFreeReplacement(item); } }}
+              onChange={(event) => setReplacementQueries((current) => ({ ...current, [item.id]: event.target.value }))} />
+            <button type="button" className="button secondary small"
+              disabled={busy || replacingImage !== null || (reviewJob?.details?.free_replacements_used ?? 0) >= (reviewJob?.details?.max_free_replacements ?? 8)}
+              onClick={() => findFreeReplacement(item)}>
+              {replacingImage === item.id ? "Searching…" : "Find free alternative"}
+            </button>
+          </span>
+        </span>
+      </div>
+    );
+  }
+
   const details = job?.details;
-  const isSingleDocx = file?.name.toLowerCase().endsWith(".docx") ?? false;
+  const isSingleDocx = (file?.name || job?.original_filename || reviewJob?.original_filename || "").toLowerCase().endsWith(".docx");
   const isWordOutput = job?.output_filename?.toLowerCase().endsWith(".docx") ?? false;
   return (
     <form className="panel-stack" onSubmit={submit}>
@@ -2066,13 +2185,26 @@ function CourseImagesPanel() {
         <section className="card">
           <div className="section-heading">
             <span>01</span><div><h3>Upload documents</h3>
-            <p>Upload one Word document or a ZIP of Word chapters. Edited chapters are returned in the same format.</p></div>
+            <p>Upload one Word document or a course ZIP. ZIP downloads keep the original chapter filenames, folders and other course assets.</p></div>
           </div>
           <FileField
             label="Course DOCX / ZIP" accept=".docx,.zip"
             onChange={(files) => { setFile(files[0] || null); resetResults(); }}
             help={file?.name || "Choose a .docx file or a .zip containing Word chapters"}
           />
+          {file?.name.toLowerCase().endsWith(".zip") && mode === "insert" && (
+            <label className="input-label">
+              Target images per chapter
+              <select value={imagesPerChapter} onChange={(event) => { setImagesPerChapter(Number(event.target.value)); resetResults(); }}>
+                <option value={1}>1 image per chapter</option>
+                <option value={2}>2 images per chapter (recommended)</option>
+                <option value={3}>3 images per chapter</option>
+                <option value={4}>4 images per chapter</option>
+                <option value={5}>5 images per chapter</option>
+              </select>
+              <small>Spread image suggestions across the teaching content of each Word file. Larger ZIPs are searched in resumable batches.</small>
+            </label>
+          )}
           <label className="input-label">
             Course / Module Title (strongly recommended for accurate matches)
             <input value={courseName} placeholder="Enter the exact course title, e.g. HR and Payroll Management for the UK"
@@ -2131,10 +2263,13 @@ function CourseImagesPanel() {
           </label>
           {mode === "insert" && (
             <label className="toggle-row">
-              <input type="checkbox" checked={previewImages}
+              <input type="checkbox" checked={Boolean(file?.name.toLowerCase().endsWith(".zip")) || previewImages}
+                disabled={Boolean(file?.name.toLowerCase().endsWith(".zip"))}
                 onChange={(event) => { setPreviewImages(event.target.checked); resetResults(); }} />
               <span><strong>Preview images before adding</strong>
-                <small>Review candidates and uncheck unwanted images before producing the Word file.</small></span>
+                <small>{file?.name.toLowerCase().endsWith(".zip")
+                  ? "Required for ZIP batches: approve photos per chapter and keep the original ZIP structure."
+                  : "Review candidates and uncheck unwanted images before producing the Word file."}</small></span>
             </label>
           )}
           <label className="toggle-row">
@@ -2155,14 +2290,14 @@ function CourseImagesPanel() {
       {error && <div className="error-box" role="alert">{error}</div>}
       {!reviewJob && (
         <button type="submit" className="button primary large" disabled={!file || busy}>
-          {busy ? "Searching image sources…" : mode === "guides" ? "Create search guides" : previewImages ? "Find images and preview" : "Add images to Word"}
+          {busy ? "Searching image sources…" : mode === "guides" ? "Create search guides" : (previewImages || file?.name.toLowerCase().endsWith(".zip")) ? "Find images and preview" : "Add images to Word"}
         </button>
       )}
       {reviewJob && !job && (
         <section className="card image-review-section">
           <div className="section-heading">
             <span>03</span><div><h3>Review your suggested images</h3>
-              <p>Only tick photographs that genuinely illustrate the heading and the course. No images are pre-approved. Images already downloaded will not consume more requests when you confirm.</p></div>
+              <p>Review photographs by chapter, approve only relevant matches and search further batches when needed. Confirmation never calls stock providers again.</p></div>
           </div>
           <div className="image-summary-grid">
             <div><strong>{candidates.length}</strong><span>Photos found</span></div>
@@ -2179,47 +2314,78 @@ function CourseImagesPanel() {
               {reviewJob.details?.provider_attempts && <> Search attempts: {Object.entries(reviewJob.details.provider_attempts).map(([name, count]) => `${name}: ${count}`).join(" · ")}.</>}
             </p>
           )}
-          {candidates.length > 0 ? (
-            <>
-              <div className="image-review-controls">
-                <span>{selectedImages.length} of {candidates.length} selected</span>
-                <button type="button" className="button secondary" onClick={() => setSelectedImages(candidates.map((item) => item.id))}>Select all</button>
-                <button type="button" className="button secondary" onClick={() => setSelectedImages([])}>Deselect all</button>
+          {isZipReview && (
+            <div className="zip-batch-overview">
+              <strong>ZIP batch · {chapterProgress.length} Word chapters</strong>
+              <span>{reviewJob.details?.stock_lookups_attempted ?? 0} of {reviewJob.details?.planned_image_positions ?? 0} planned heading searches completed</span>
+              <span>{reviewJob.details?.remaining_positions ?? 0} positions remaining · {reviewJob.details?.batch_count ?? 1} search batch(es)</span>
+              <div className="zip-batch-progress" role="progressbar"
+                aria-valuemin={0} aria-valuemax={reviewJob.details?.planned_image_positions || 1}
+                aria-valuenow={(reviewJob.details?.planned_image_positions || 0) - (reviewJob.details?.remaining_positions || 0)}>
+                <div style={{ width: `${reviewJob.details?.planned_image_positions ? 100 * ((reviewJob.details.planned_image_positions - (reviewJob.details.remaining_positions || 0)) / reviewJob.details.planned_image_positions) : 100}%` }} />
               </div>
-              <div className="image-review-grid">
-                {candidates.map((item) => (
-                  <div className={`image-review-card ${selectedImages.includes(item.id) ? "selected" : ""}`} key={item.id}>
-                    <img src={apiUrl(item.preview_url)} alt={`Suggested ${item.source} photograph for ${item.heading}`} loading="lazy" />
-                    <span className="image-review-body">
-                      <label className="image-review-heading"><input type="checkbox"
-                        checked={selectedImages.includes(item.id)}
-                        onChange={(event) => setSelectedImages((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />
-                        <strong>{item.heading}</strong>
-                      </label>
-                      <small>{item.chapter}</small>
-                      {item.intended_scene && <span className="image-scene-hint"><strong>Intended photograph: </strong>{item.intended_scene}</span>}
-                      <small><strong>Stock search:</strong> {item.search}</small>
-                      <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
-                      {item.author && <small>Photo: {item.author}</small>}
-                      {item.source_url?.startsWith("https://") && <a href={item.source_url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>View source and licence</a>}
-                      <span className="image-replace-controls">
-                        <input aria-label={`Free photo search for ${item.heading}`}
-                          value={replacementQueries[item.id] ?? item.search}
-                          maxLength={110}
-                          onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); findFreeReplacement(item); } }}
-                          onChange={(event) => setReplacementQueries((current) => ({ ...current, [item.id]: event.target.value }))} />
-                        <button type="button" className="button secondary small"
-                          disabled={busy || replacingImage !== null || (reviewJob.details?.free_replacements_used ?? 0) >= 8}
-                          onClick={() => findFreeReplacement(item)}>
-                          {replacingImage === item.id ? "Searching…" : "Find free alternative"}
-                        </button>
+              <small>Images are distributed across chapters. Each chapter may have fewer results if providers cannot find suitable photos.</small>
+            </div>
+          )}
+          {reviewJob.details?.has_more && (
+            <div className="zip-batch-actions">
+              <p>Some chapters still have unsearched image positions. You can continue in another capped batch without losing your current approvals or repeating earlier searches.</p>
+              <button type="button" className="button secondary" onClick={findNextImageBatch}
+                disabled={busy || replacingImage !== null}>
+                {busy ? "Searching next batch…" : `Find next batch (${reviewJob.details.remaining_positions} remaining)`}
+              </button>
+            </div>
+          )}
+          {candidates.length > 0 && (
+            <div className="image-review-controls">
+              <span>{selectedImages.length} of {candidates.length} selected</span>
+              <button type="button" className="button secondary" disabled={busy || replacingImage !== null}
+                onClick={() => setSelectedImages(candidates.map((item) => item.id))}>Select all</button>
+              <button type="button" className="button secondary" disabled={busy || replacingImage !== null}
+                onClick={() => setSelectedImages([])}>Deselect all</button>
+            </div>
+          )}
+          {isZipReview && chapterProgress.length > 0 ? (
+            <div className="zip-chapter-list">
+              {chapterProgress.map((chapter) => {
+                const images = candidates.filter((item) => item.chapter_index === chapter.index);
+                const approved = images.filter((image) => selectedImages.includes(image.id)).length;
+                const expanded = expandedChapter === chapter.index;
+                return (
+                  <section className="zip-chapter" key={`${chapter.index}-${chapter.path}`}>
+                    <button type="button" className="zip-chapter-toggle"
+                      aria-expanded={expanded} onClick={() => setExpandedChapter(expanded ? null : chapter.index)}>
+                      <span className="zip-chapter-heading">
+                        <strong>{chapter.path}</strong>
+                        <small>{chapter.eligible} eligible headings · {chapter.searched}/{chapter.planned} searched · {chapter.found} photos found</small>
                       </span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : <p className="image-cost-notice">No sufficiently relevant photographs were retrieved from the current free searches. Try a specific course title and use the suggested search links below. The Word document is unchanged.</p>}
+                      <span className="zip-chapter-meta">{approved}/{images.length} approved <span aria-hidden="true">{expanded ? "▴" : "▾"}</span></span>
+                    </button>
+                    {expanded && (
+                      <div className="zip-chapter-body">
+                        {images.length > 0 ? (
+                          <>
+                            <div className="image-review-controls">
+                              <span>Review photos for this chapter only</span>
+                              <button type="button" className="button secondary small" disabled={busy || replacingImage !== null}
+                                onClick={() => selectChapterImages(chapter.index, true)}>Approve chapter photos</button>
+                              <button type="button" className="button secondary small" disabled={busy || replacingImage !== null}
+                                onClick={() => selectChapterImages(chapter.index, false)}>Clear chapter approval</button>
+                            </div>
+                            <div className="image-review-grid">{images.map(renderCandidate)}</div>
+                          </>
+                        ) : <p className="zip-chapter-empty">{chapter.searched < chapter.planned
+                          ? "This chapter is waiting for a future search batch."
+                          : "No suitable photos were returned for this chapter. The Word file will be preserved unchanged."}</p>}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+          ) : candidates.length > 0 ? (
+            <div className="image-review-grid">{candidates.map(renderCandidate)}</div>
+          ) : <p className="image-cost-notice">No photographs were retrieved from the completed searches. Try a specific course title and use the suggested search links below. Your Word documents are unchanged.</p>}
           {Array.isArray(reviewJob.details?.missing_images) && reviewJob.details.missing_images.length > 0 && (
             <details className="image-result-warnings" open={candidates.length === 0}>
               <summary>Open free searches for {reviewJob.details.missing_images.length} headings without photos</summary>
@@ -2248,11 +2414,13 @@ function CourseImagesPanel() {
             downloadLabel={mode === "guides" ? "Download guides ZIP" : isWordOutput ? "Download Word document" : "Download edited Word ZIP"} />
           <p className="image-completion-note">
             {mode === "insert"
-              ? `${details?.photos_inserted ?? 0} image(s) embedded in ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP above."}`
+              ? `${details?.photos_inserted ?? 0} image(s) embedded in ${details?.documents_with_images ?? 0} Word document(s). ${isSingleDocx ? "Download the DOCX above." : "Download the ZIP with the original course folders, filenames and an image insertion report."}`
               : `${details?.guides_created ?? 0} guide(s) created.`}
           </p>
           {mode === "insert" && (
             <div className="image-summary-grid">
+              <div><strong>{details?.documents_unchanged ?? 0}</strong><span>Unchanged Word files</span></div>
+              <div><strong>{details?.documents_failed ?? 0}</strong><span>Chapter insertion failures</span></div>
               <div><strong>{details?.image_library_hits ?? 0}</strong><span>Reused from library</span></div>
               <div><strong>{details?.freepik_stock_downloads ?? 0}</strong><span>Freepik stock downloads</span></div>
               <div><strong>{details?.freepik_search_attempts ?? 0}</strong><span>Freepik lookup attempts</span></div>

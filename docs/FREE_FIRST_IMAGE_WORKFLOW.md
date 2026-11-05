@@ -1,4 +1,4 @@
-# Find & Add Images — v27 contextual search, diagnostic review workflow
+# Find & Add Images — v29 contextual search and ZIP batch review
 
 This workflow is separate from Document Formatter's URL/hyperlink image insertion. It leaves existing Word text, headings, paragraph styles and tables in place, inserting only the selected photographs below eligible headings.
 
@@ -9,8 +9,8 @@ This workflow is separate from Document Formatter's URL/hyperlink image insertio
 - **Server-side paid caps:** `COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=1` (failed attempts count), `COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=1` (successful stock selections). Set both to `0` for an additional server-side guarantee that Find & Add Images never requests Freepik stock.
 - **AI image generation:** unavailable in Find & Add Images. No Freepik Flux or OpenAI image-generation endpoint is called by this tab.
 - **Reuse saved image library:** ON. Free photographs are cached by heading/search **after they are selected and inserted**, not merely previewed, in S3-compatible storage or temporarily in `STORAGE_DIR`.
-- **Big ZIP fairness and timeouts:** Preview positions are spread across chapters before the maximum is applied. By default at most 16 photos, 32 stock-search attempts and approximately 75 seconds of stock lookups are allocated per review. Increase `COURSE_IMAGE_MAX_PREVIEW_IMAGES`, `COURSE_IMAGE_MAX_STOCK_LOOKUPS` or `COURSE_IMAGE_MAX_SEARCH_SECONDS` in Railway for bigger batches if acceptable; reports name any skipped headings.
-- **Preview images first:** ON. Untick unsuitable images or change search words with **Find free alternative** (never uses Freepik; at most 8 successful swaps per review).
+- **Big ZIP fairness and timeouts:** Choose 1–5 planned photos per chapter (2 by default). Searches are spread across chapters. Per search batch: up to 16 images, 32 stock-lookups and approximately 75 seconds. Continue via **Find next batch** without repeating previous searches, up to 80 photos per review by default. Set `COURSE_IMAGE_MAX_TOTAL_PREVIEW_IMAGES` if appropriate.
+- **Preview images first:** ON. Untick unsuitable images or change search words with **Find free alternative** (never uses Freepik; at most 24 successful swaps per review by default).
 - **OpenRouter text improvement:** OFF by default, because it is optional and may have a separate text API cost. It now supports conceptually appropriate photo synonyms without requiring exact academic heading words.
 - **Contextual photo searches:** professional conflict headings are converted to photographable scenes. Pexels results with no detailed caption are allowed into the preview (not automatically approved). Openverse can retrieve CC0/PDM StockSnap CDN photographs as well as Wikimedia hosts.
 - **Zero-result help:** the results screen shows which providers are configured, how many requests were made to each, and heading-specific Pexels and StockSnap search links. Without a Pexels/Pixabay key, Openverse is usable but may have insufficient photographs for a particular academic heading.
@@ -21,8 +21,9 @@ This workflow is separate from Document Formatter's URL/hyperlink image insertio
 2. Leave Mixed and **Allow paid Freepik stock fallback** unchecked for the lowest-risk option. Keep reuse and preview turned on.
 3. Click **Find images and preview**. Inspect every heading, picture, source, photographer and licence. Search words are intentionally short and describe a plausible photograph rather than repeating the full course title.
 4. If the photo is unrelated, type a better visual search phrase and click **Find free alternative**. The same review and selected state are preserved. If still unsuitable, untick it.
-5. Click **Insert selected images and download**. Confirmation uses stored image bytes; it never calls image providers again. One DOCX uploads to one DOCX; ZIP to ZIP.
-6. Verify the resulting Word layout and the publication rights for every retained photograph. Images affect pagination even though the underlying text and styles are not rewritten.
+5. In ZIP mode, review expandable chapter cards and use **Approve chapter photos** / **Clear chapter approval**. Choose **Find next batch** if planned headings remain. The browser session restores an existing private review after refresh.
+6. Click **Insert selected images and download**. Confirmation uses stored image bytes; it never calls image providers again. One DOCX uploads to one DOCX; ZIP to ZIP preserving original paths and an insertion CSV report.
+7. Verify the resulting Word layout and the publication rights for every retained photograph. Images affect pagination even though the underlying text and styles are not rewritten.
 
 ## Configuring Railway/Vercel
 
@@ -35,19 +36,23 @@ FREEPIK_API_KEY=  # Optional paid fallback; may be omitted
 COURSE_IMAGE_MAX_FREEPIK_ATTEMPTS=1
 COURSE_IMAGE_MAX_FREEPIK_DOWNLOADS=1
 COURSE_IMAGE_MAX_PREVIEW_IMAGES=16
+COURSE_IMAGE_MAX_TOTAL_PREVIEW_IMAGES=80
+COURSE_IMAGE_MAX_FREE_REPLACEMENTS=24
 COURSE_IMAGE_MAX_STOCK_LOOKUPS=32
 COURSE_IMAGE_MAX_SEARCH_SECONDS=75
 # Configure S3_BUCKET, S3_ENDPOINT, S3_ACCESS_KEY_ID,
 # S3_SECRET_ACCESS_KEY and S3_REGION for persistent reuse.
 ```
 
-For Vercel, set `NEXT_PUBLIC_API_URL` to the public Railway backend URL (without a trailing slash). In Railway, add the Vercel origin to `ALLOWED_ORIGINS`. Redeploy both services. `GET /health` should show `2026.11.03-v27-contextual-search-diagnostics`.
+For Vercel, set `NEXT_PUBLIC_API_URL` to the public Railway backend URL (without a trailing slash). In Railway, add the Vercel origin to `ALLOWED_ORIGINS`. Redeploy both services. `GET /health` should show `2026.11.05-v29-zip-batch-image-review`.
 
 The Pexels API is free subject to its published rate limits and attribution/link guidance. Pixabay search responses are cached for 24 hours. Openverse matches are restricted to CC0/PDM metadata and actual photos hosted on approved Wikimedia CDN hosts. Check the source licence and context before publishing. Freepik catalogue/download calls may still count against the account; the app cannot measure actual charged credits. A Freepik "freemium" label is not a guarantee of unrestricted rights.
 
 ## API summary
 
-- `POST /api/v1/course-images/review` — multipart: `document`, `course_name`, `image_source=mixed`, `reuse_existing=true`, `allow_freepik=false`, `use_openrouter=false`; returns a private `review_ready` job with image thumbnail URLs.
+- `POST /api/v1/course-images/review` — multipart: `document`, `course_name`, `image_source=mixed`, `reuse_existing=true`, `allow_freepik=false`, `use_openrouter=false`, `images_per_chapter=2` (ZIP only); returns a private `review_ready` job with image thumbnail URLs.
+- `GET /api/v1/course-images/reviews/{job_id}` — recover preview metadata after a refresh.
+- `POST /api/v1/course-images/reviews/{job_id}/continue` — search the next bounded batch, retaining existing photos and user approvals.
 - `GET /api/v1/course-images/reviews/{job_id}/images/{image_id}` — thumbnail JPEG, includes browser-cache revision after replacement.
 - `POST /api/v1/course-images/reviews/{job_id}/replace` — JSON `{ "image_id": 0, "search": "nurse medication care" }`; finds one free alternative, does not modify the original DOCX, reuses the review ID.
 - `POST /api/v1/course-images/reviews/{job_id}/confirm` — JSON `{ "selected_ids": [0, 2] }`; inserts existing selected images and returns the final DOCX/ZIP download job.

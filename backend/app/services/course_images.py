@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from urllib.parse import quote, quote_plus, urlparse
 import zipfile
 
@@ -66,6 +67,7 @@ class Chapter:
     payload: bytes
     number: str
     title: str
+    relative_path: str = ""
 
 
 @dataclass
@@ -437,6 +439,7 @@ def _read_chapters(raw: bytes, filename: str) -> tuple[list[Chapter], list[tuple
     chapters: list[Chapter] = []
     covers: list[tuple[str, bytes]] = []
     total_size = 0
+    seen_document_paths: set[str] = set()
     try:
         with zipfile.ZipFile(BytesIO(raw)) as archive:
             if len(archive.infolist()) > MAX_ARCHIVE_FILES:
@@ -444,7 +447,10 @@ def _read_chapters(raw: bytes, filename: str) -> tuple[list[Chapter], list[tuple
             for info in archive.infolist():
                 if info.is_dir() or not safe_zip_member(info.filename):
                     continue
-                name = PurePosixPath(normalise_zip_name(info.filename)).name
+                if stat.S_IFMT(info.external_attr >> 16) == stat.S_IFLNK:
+                    continue
+                relative_path = normalise_zip_name(info.filename)
+                name = PurePosixPath(relative_path).name
                 extension = Path(name).suffix.lower()
                 if extension not in {".docx", ".png", ".jpg", ".jpeg", ".webp"}:
                     continue
@@ -454,7 +460,10 @@ def _read_chapters(raw: bytes, filename: str) -> tuple[list[Chapter], list[tuple
                 if total_size > MAX_ARCHIVE_BYTES:
                     raise CourseImagesError("Archive contains too much uncompressed data.")
                 if extension == ".docx" and not SKIP_DOC.search(_chapter_title(name)):
-                    chapters.append(Chapter(name, archive.read(info), _number(name, len(chapters) + 1), _chapter_title(name)))
+                    if relative_path.lower() in seen_document_paths:
+                        continue
+                    seen_document_paths.add(relative_path.lower())
+                    chapters.append(Chapter(name, archive.read(info), _number(name, len(chapters) + 1), _chapter_title(name), relative_path))
                 elif extension != ".docx" and re.search(r"\bcover\b", re.sub(r"[_-]", " ", Path(name).stem), re.I):
                     covers.append((name, archive.read(info)))
     except (zipfile.BadZipFile, zipfile.LargeZipFile) as exc:

@@ -182,6 +182,7 @@ class FreeFirstCourseImagesTests(TestCase):
         preview = make_image_preview(out.getvalue(), "Chapters.zip", provider=provider)
         final = finish_image_preview(preview.payload, [0])
         with zipfile.ZipFile(BytesIO(final.payload)) as archive:
-            self.assertEqual(len(archive.namelist()), 2)
-            self.assertEqual(len(Document(BytesIO(archive.read("Unit 1_with_images.docx"))).inline_shapes), 1)
-            self.assertEqual(len(Document(BytesIO(archive.read("Unit 2_with_images.docx"))).inline_shapes), 0)
+            self.assertEqual(len(archive.namelist()), 3)
+            self.assertIn("SLC_Image_Insertion_Report.csv", archive.namelist())
+            self.assertEqual(len(Document(BytesIO(archive.read("Unit 1.docx"))).inline_shapes), 1)
+            self.assertEqual(len(Document(BytesIO(archive.read("Unit 2.docx"))).inline_shapes), 0)
