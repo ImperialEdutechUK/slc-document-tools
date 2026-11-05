@@ -35,8 +35,6 @@ from .course_image_integrations import FreepikImages, OpenRouterScenes, freepik_
 from .course_image_library import ImageLibrary, SavedImage
 from .free_stock_sources import find_pixabay, find_openverse
 from .course_visual_context import contextual_scene
-from .course_image_relevance import RelevanceContext, lock_query, metadata_decision, find_domain
-from .course_image_vision import OpenRouterVision
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
@@ -111,10 +109,6 @@ class Picture:
     licence: str = ""
     author: str = ""
     reused: bool = False
-    caption: str = ""
-    relevance_score: int | None = None
-    relevance_reason: str = ""
-    verification_method: str = ""
 
 
 @dataclass
@@ -160,13 +154,6 @@ class Provider:
         "Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0,
     })
     warnings: list[str] = field(default_factory=list)
-    # Set per-heading by the image-review workflow; never affects normal
-    # formatter, cover or search-guide operations.
-    active_context: RelevanceContext | None = None
-    vision_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini").strip())
-    relevance_rejections: int = 0
-    vision_checks: int = 0
-    vision_limit: int = field(default_factory=lambda: max(1, min(60, int(os.getenv("COURSE_IMAGE_MAX_VISION_CHECKS", "32")))))
 
     @property
     def available(self) -> bool:
@@ -196,68 +183,18 @@ class Provider:
                 portrait=portrait,
             )
 
-    def _metadata_gate(self, caption: str) -> bool:
-        context = self.active_context
-        if context is None:
-            return True
-        decision = metadata_decision(caption, context)
-        # With vision enabled, empty or vague provider captions may be
-        # evaluated using pixels. Explicit cross-discipline matches are never
-        # rescued by a high generic search rank.
-        if context.verify_pixels and decision.reason != "Corporate photograph does not show the required care setting":
-            return True
-        if not decision.eligible:
-            self.relevance_rejections += 1
-        return decision.eligible
-
-    def _accept_picture(self, picture: Picture) -> bool:
-        context = self.active_context
-        if context is None:
-            return True
-        metadata = metadata_decision(picture.caption, context)
-        if context.verify_pixels:
-            if self.vision_checks >= self.vision_limit:
-                self.relevance_rejections += 1
-                return False
-            self.vision_checks += 1
-            result = OpenRouterVision(self.openrouter_key, self.vision_model).check(picture.payload, context)
-            picture.verification_method = "visual"
-            picture.relevance_score = result.score
-            picture.relevance_reason = result.reason
-            if not result.eligible:
-                self.relevance_rejections += 1
-                return False
-            return True
-        picture.verification_method = "metadata"
-        picture.relevance_score = metadata.score
-        picture.relevance_reason = metadata.reason
-        if not metadata.eligible:
-            self.relevance_rejections += 1
-            return False
-        return True
-
     def find(
         self, query: str, *, portrait: bool = False, generate: bool = True,
         prompt: str = "", subject: str = "",
     ) -> Picture | None:
-        if self.active_context is not None:
-            # Course discipline remains locked even when text-only query
-            # refinement suggests a broad corporate/office search.
-            query = lock_query(query, self.active_context.domain, self.active_context.heading)
         source = "mixed" if self.stock_source == "auto" else self.stock_source
         allow_free = source in {"mixed", "free", "pexels", "pixabay", "openverse"}
         if allow_free and self.reuse_existing:
-            # Older library photos were not visually verified. In strict mode,
-            # only re-use them when the user explicitly enables pixel checks.
-            safe_reuse = self.active_context is None or self.active_context.verify_pixels
-            saved = self.library.find(query, subject, portrait=portrait) if safe_reuse else None
+            saved = self.library.find(query, subject, portrait=portrait)
             if saved and saved.identifier not in self.used_photos:
-                candidate = Picture(saved.payload, saved.source, saved.source_url, saved.identifier,
-                                    saved.licence, saved.author, reused=True)
-                if self._accept_picture(candidate):
-                    self.used_photos.add(saved.identifier)
-                    self.library_hits += 1
-                    return candidate
+                self.used_photos.add(saved.identifier)
+                self.library_hits += 1
+                return Picture(saved.payload, saved.source, saved.source_url, saved.identifier, saved.licence, saved.author, reused=True)
         if source in {"mixed", "free", "pexels"} and self.pexels_key:
             self.provider_attempts["Pexels"] += 1
             try:
@@ -274,20 +211,14 @@ class Provider:
                 result = find_pixabay(
                     self.pixabay_key, query, subject, self.used_photos,
                     portrait=portrait, normalise=lambda raw: _normalised_image(raw, portrait=portrait),
-                    **({"metadata_gate": self._metadata_gate, "include_caption": True} if self.active_context else {}),
                 )
                 if result:
-                    raw, page, identifier, licence, author = result[:5]
-                    # Metadata filtering happens before download in the stock
-                    # search, but vision can still reject the actual pixels.
-                    found = Picture(raw, "Pixabay", page, identifier, licence, author,
-                                    caption=result[5] if len(result) > 5 else "")
-                    if self._accept_picture(found):
-                        self.used_photos.add(identifier)
-                        self.provider_successes["Pixabay"] += 1
-                        self._remember(query, subject, found, portrait=portrait)
-                        return found
+                    raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
+                    found = Picture(raw, "Pixabay", page, identifier, licence, author)
+                    self.provider_successes["Pixabay"] += 1
+                    self._remember(query, subject, found, portrait=portrait)
+                    return found
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Pixabay lookup was unsuccessful: {type(exc).__name__}.")
         if source in {"mixed", "free", "openverse"} and self.openverse_enabled:
@@ -296,18 +227,14 @@ class Provider:
                 result = find_openverse(
                     query, subject, self.used_photos,
                     portrait=portrait, normalise=lambda raw: _normalised_image(raw, portrait=portrait),
-                    **({"metadata_gate": self._metadata_gate, "include_caption": True} if self.active_context else {}),
                 )
                 if result:
-                    raw, page, identifier, licence, author = result[:5]
-                    found = Picture(raw, "Openverse", page, identifier, licence, author,
-                                    caption=result[5] if len(result) > 5 else "")
-                    if self._accept_picture(found):
-                        self.used_photos.add(identifier)
-                        self.provider_successes["Openverse"] += 1
-                        self._remember(query, subject, found, portrait=portrait)
-                        return found
+                    raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
+                    found = Picture(raw, "Openverse", page, identifier, licence, author)
+                    self.provider_successes["Openverse"] += 1
+                    self._remember(query, subject, found, portrait=portrait)
+                    return found
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Openverse lookup was unsuccessful: {type(exc).__name__}.")
         # Licensed Freepik stock is the final fallback. No AI generation call is made.
@@ -323,21 +250,13 @@ class Provider:
                     query, subject=subject, portrait=portrait, used=self.used_photos,
                     normalise=lambda raw: _normalised_image(raw, portrait=portrait),
                     max_candidates=1,  # Avoid several licensed downloads while searching one heading.
-                    **({"metadata_gate": self._metadata_gate, "include_caption": True} if self.active_context else {}),
                 )
                 if result:
-                    raw, page, identifier, licence, author = result[:5]
-                    self.freepik_downloads += 1
-                    # Freepik metadata is checked in its search API separately;
-                    # pixels are checked here if the user opted in. Never
-                    # count a rejected image as a successful recommendation.
-                    candidate = Picture(raw, "Freepik", page, identifier, licence, author,
-                                        caption=result[5] if len(result) > 5 else "")
-                    if self._accept_picture(candidate):
-                        self.used_photos.add(identifier)
-                        self.provider_successes["Freepik"] += 1
-                        return candidate
+                    raw, page, identifier, licence, author = result
                     self.used_photos.add(identifier)
+                    self.freepik_downloads += 1
+                    self.provider_successes["Freepik"] += 1
+                    return Picture(raw, "Freepik", page, identifier, licence, author)
             except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
                 self.warnings.append(f"Freepik stock lookup was unsuccessful: {type(exc).__name__}.")
         return None
@@ -399,9 +318,11 @@ class Provider:
             response.raise_for_status()
             result = response.json()
             photos = result.get("photos") or []
-            # Pexels alt text can be absent; in strict mode such pictures are
-            # skipped unless optional pixel verification is enabled. Provider
-            # relevance ranking alone is not evidence of a care setting.
+            # Pexels does not provide detailed title/tag metadata. `alt` is
+            # optional and cannot be used as a hard relevancy gate: a useful
+            # API-ranked photograph may have an empty caption. Prefer overlap
+            # when present, but ALWAYS allow the best provider-ranked results
+            # into the user's review queue. Nothing is auto-approved.
             tokens = set(_tokens(query))
             ranked: list[tuple[int, dict]] = []
             for order, photo in enumerate(photos):
@@ -410,8 +331,6 @@ class Provider:
                     continue
                 caption = " ".join((str(photo.get("alt") or ""),
                                     str(photo.get("url") or "").replace("-", " ")))
-                if not self._metadata_gate(caption):
-                    continue
                 overlap = len(tokens & set(_tokens(caption)))
                 # Prefer matches, then preserve Pexels' own relevance order.
                 ranked.append((overlap * 100 - order, photo))
@@ -435,16 +354,8 @@ class Provider:
                 except (httpx.HTTPError, ValueError, OSError, UnidentifiedImageError):
                     continue
                 identifier = str(photo["id"])
-                candidate = Picture(payload, "Pexels", str(photo.get("url", "")),
-                                    f"pexels:{identifier}", "Pexels License",
-                                    str(photo.get("photographer") or "")[:100], caption=" ".join((
-                                        str(photo.get("alt") or ""),
-                                        str(photo.get("url") or "").replace("-", " "))))
-                if not self._accept_picture(candidate):
-                    self.used_photos.add(candidate.identifier)
-                    continue
-                self.used_photos.add(candidate.identifier)
-                return candidate
+                self.used_photos.add(f"pexels:{identifier}")
+                return Picture(payload, "Pexels", str(photo.get("url", "")), f"pexels:{identifier}", "Pexels License", str(photo.get("photographer") or "")[:100])
         return None
 
     def _generate(self, prompt: str, *, portrait: bool) -> Picture:
@@ -1085,29 +996,15 @@ def build_course_image_package(
     for chapter in chapters:
         try:
             document = Document(BytesIO(chapter.payload))
-            overview = _chapter_overview(document)
-            chapter_domain = find_domain(course_title, chapter.title, overview)
-            # Keep the older direct-insert API compatible, but apply the same
-            # strict provider relevance gate used by the review workflow.
-            scene_course = {
-                "adult_safeguarding": "social care", "child_safeguarding": "child safeguarding",
-                "healthcare": "healthcare", "education": "education", "management": "business management",
-            }.get(chapter_domain, "")
-            plans, eligible_count = _plans(document, f"{scene_course} {course_title} {chapter.title}")
+            plans, eligible_count = _plans(document, course_title + " " + chapter.title)
             if use_openrouter and plans:
-                provider.refine_plans(course_title, chapter.title, plans, chapter_overview=overview)
+                provider.refine_plans(course_title, chapter.title, plans, chapter_overview=_chapter_overview(document))
             total_recommended += len(plans)
             acquired: dict[int, Picture] = {}
             if mode == "insert":
                 for plan in plans:
-                    provider.active_context = RelevanceContext(
-                        domain=chapter_domain, course=course_title, heading=plan.heading,
-                        intended_scene=plan.description,
-                        query=lock_query(plan.search, chapter_domain, plan.heading),
-                        mode="strict", verify_pixels=False,
-                    )
                     photo = provider.find(
-                        provider.active_context.query, generate=generate_missing, subject=plan.heading,
+                        plan.search, generate=generate_missing, subject=plan.heading,
                         prompt=f"UK educational chapter '{chapter.title}', course '{course_title}', "
                         f"heading '{plan.heading}'. {plan.description}. "
                         f"Supporting passage: {plan.context[:340]}",
@@ -1127,7 +1024,6 @@ def build_course_image_package(
                         warnings.append(f"{chapter.filename}: no suitable image found for '{plan.heading}'.")
                 photos_inserted += len(acquired)
                 enhanced.append((f"{Path(chapter.filename).stem}_with_images.docx", _insert_images(document, plans, acquired)))
-                provider.active_context = None
             else:
                 name = f"{chapter.number}_Matching_Image_Search_Guide.docx"
                 if name.lower() in used_guide_names:
@@ -1141,7 +1037,6 @@ def build_course_image_package(
             if not plans:
                 warnings.append(f"{chapter.filename}: no eligible headings without an existing image were found.")
         except Exception as exc:
-            provider.active_context = None
             # Keep all other chapters progressing without claiming this one
             # succeeded. Includes malformed DOCX payloads.
             warnings.append(f"{chapter.filename}: could not be processed ({type(exc).__name__}).")

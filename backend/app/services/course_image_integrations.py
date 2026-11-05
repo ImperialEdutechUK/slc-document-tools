@@ -127,8 +127,6 @@ class FreepikImages:
         self, query: str, *, subject: str, portrait: bool,
         used: set[str], normalise: Callable[[bytes], bytes],
         max_candidates: int = 1,
-        metadata_gate: Callable[[str], bool] | None = None,
-        include_caption: bool = False,
     ) -> tuple[bytes, str, str, str, str] | None:
         """Return JPG, item URL, photo ID, licence type and author; no previews."""
         with httpx.Client(timeout=25, follow_redirects=False) as client:
@@ -152,8 +150,6 @@ class FreepikImages:
                     continue
                 caption = _normal_tokens(str(item.get("title") or ""))
                 if not caption & query_terms or (subject_terms and not caption & subject_terms):
-                    continue
-                if metadata_gate is not None and not metadata_gate(str(item.get("title") or "")):
                     continue
                 scored.append((len(caption & query_terms), item))
             scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -183,8 +179,7 @@ class FreepikImages:
                         licenses = item.get("licenses") or []
                         license_type = next((str(x.get("type")) for x in licenses if isinstance(x, dict)), "unverified")
                         author = item.get("author") if isinstance(item.get("author"), dict) else {}
-                        result = (payload, page, f"freepik:{item_id}", license_type, str(author.get("name") or "")[:100])
-                        return (*result, str(item.get("title") or "")) if include_caption else result
+                        return payload, page, f"freepik:{item_id}", license_type, str(author.get("name") or "")[:100]
                     except (httpx.HTTPError, ValueError, TypeError, OSError):
                         continue
         return None

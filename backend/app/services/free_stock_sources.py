@@ -10,7 +10,6 @@ import hashlib
 import json
 import re
 import time
-from typing import Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -169,9 +168,7 @@ def _pixabay_search(client: httpx.Client, api_key: str, query: str, portrait: bo
     return hits
 
 
-def find_pixabay(key: str, query: str, subject: str, used: set[str], *, portrait: bool, normalise,
-                 metadata_gate: Callable[[str], bool] | None = None,
-                 include_caption: bool = False) -> tuple | None:
+def find_pixabay(key: str, query: str, subject: str, used: set[str], *, portrait: bool, normalise) -> tuple[bytes, str, str, str, str] | None:
     if not key:
         return None
     # One primary query + at most one broader query. This avoids repeatedly
@@ -183,7 +180,6 @@ def find_pixabay(key: str, query: str, subject: str, used: set[str], *, portrait
             hits = _pixabay_search(client, key, search, portrait)
             ranked = sorted(
                 ((score, order, hit) for order, hit in enumerate(hits) if isinstance(hit, dict)
-                 and (metadata_gate is None or metadata_gate(str(hit.get("tags", ""))))
                  and (score := _rank(query, subject, str(hit.get("tags", "")))) > 0),
                 key=lambda it: (-it[0], it[1]),
             )
@@ -196,16 +192,13 @@ def find_pixabay(key: str, query: str, subject: str, used: set[str], *, portrait
                     continue
                 try:
                     payload = normalise(_download(client, url, ALLOWED_PIXABAY_HOSTS))
-                    result = (payload, str(hit.get("pageURL", "")), identifier, "Pixabay Content License", str(hit.get("user", ""))[:100])
-                    return (*result, str(hit.get("tags", ""))) if include_caption else result
+                    return payload, str(hit.get("pageURL", "")), identifier, "Pixabay Content License", str(hit.get("user", ""))[:100]
                 except (ValueError, httpx.HTTPError, OSError):
                     continue
     return None
 
 
-def find_openverse(query: str, subject: str, used: set[str], *, portrait: bool, normalise,
-                  metadata_gate: Callable[[str], bool] | None = None,
-                  include_caption: bool = False) -> tuple | None:
+def find_openverse(query: str, subject: str, used: set[str], *, portrait: bool, normalise) -> tuple[bytes, str, str, str, str] | None:
     with httpx.Client(timeout=22, follow_redirects=False) as client:
         response = client.get(
             "https://api.openverse.org/v1/images/",
@@ -231,8 +224,6 @@ def find_openverse(query: str, subject: str, used: set[str], *, portrait: bool, 
             if not _allowed_https(url, ALLOWED_OPENVERSE_HOSTS):
                 continue
             label = str(hit.get("title") or "") + " " + " ".join(str(x.get("name") or "") for x in hit.get("tags", []) if isinstance(x, dict))
-            if metadata_gate is not None and not metadata_gate(label):
-                continue
             score = _rank(query, subject, label)
             if score:
                 ranked.append((score, hit))
@@ -242,9 +233,7 @@ def find_openverse(query: str, subject: str, used: set[str], *, portrait: bool, 
                 payload = normalise(_download(client, str(hit["url"]), ALLOWED_OPENVERSE_HOSTS))
                 identifier = "openverse:" + str(hit["id"])
                 licence = str(hit.get("license", "")).upper()
-                result = (payload, str(hit.get("foreign_landing_url") or ""), identifier, licence, str(hit.get("creator") or "")[:100])
-                label = str(hit.get("title") or "") + " " + " ".join(str(x.get("name") or "") for x in hit.get("tags", []) if isinstance(x, dict))
-                return (*result, label) if include_caption else result
+                return payload, str(hit.get("foreign_landing_url") or ""), identifier, licence, str(hit.get("creator") or "")[:100]
             except (ValueError, httpx.HTTPError, OSError):
                 continue
     return None

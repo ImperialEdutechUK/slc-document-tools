@@ -53,7 +53,7 @@ from .services.course_image_review import (make_image_preview, continue_image_pr
 
 APP_NAME = "SLC Document Tools API"
 API_PREFIX = "/api/v1"
-BUILD_VERSION = "2026.11.05-v30-subject-locked-image-relevance"
+BUILD_VERSION = "2026.11.05-v29-zip-batch-image-review"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=APP_NAME, version="0.6.0")
@@ -362,8 +362,6 @@ async def review_course_images(
     allow_freepik: Annotated[bool, Form()] = False,
     use_openrouter: Annotated[bool, Form()] = False,
     images_per_chapter: Annotated[int, Form(ge=1, le=5)] = 2,
-    relevance_mode: Annotated[str, Form()] = "strict",
-    verify_images: Annotated[bool, Form()] = False,
     db: Session = Depends(get_db),
 ) -> JobResponse:
     """Find stock photos once; retain private preview bundle for later confirmation."""
@@ -372,8 +370,6 @@ async def review_course_images(
         raise HTTPException(status_code=400, detail="Upload a DOCX or a ZIP of DOCX chapters.")
     if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik"}:
         raise HTTPException(status_code=400, detail="Invalid stock source.")
-    if relevance_mode not in {"strict", "balanced"}:
-        raise HTTPException(status_code=400, detail="Select Strict or Balanced relevance checking.")
     job = _new_job(db, "course_images_preview", filename)
     try:
         raw = await document.read()
@@ -382,12 +378,6 @@ async def review_course_images(
         options = dict(course_name=course_name, image_source=image_source,
                        reuse_existing=reuse_existing, use_openrouter=use_openrouter,
                        allow_freepik=allow_freepik)
-        # Preserve existing API clients and patched callers that rely on the
-        # original v29 argument signature; the backend defaults to Strict.
-        if relevance_mode != "strict":
-            options["relevance_mode"] = relevance_mode
-        if verify_images:
-            options["verify_images"] = True
         if filename.lower().endswith(".zip"):
             options["images_per_chapter"] = images_per_chapter
         result = await run_in_threadpool(make_image_preview, raw, filename, **options)
