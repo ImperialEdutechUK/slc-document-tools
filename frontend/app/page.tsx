@@ -1926,6 +1926,10 @@ type CourseImageCandidate = {
   author?: string;
   reused?: boolean;
   preview_url: string;
+  relevance_score?: number | null;
+  relevance_reason?: string;
+  verification_method?: "metadata" | "visual" | "not_checked";
+  course_domain?: string | null;
 };
 
 type ZipChapterProgress = {
@@ -1948,10 +1952,11 @@ function CourseImagesPanel() {
   const [mode, setMode] = useState<"guides" | "insert">("insert");
   const [imageSource, setImageSource] = useState<"mixed" | "free" | "pexels" | "pixabay" | "openverse" | "freepik">("mixed");
   const [reuseExisting, setReuseExisting] = useState(true);
-  const [previewImages, setPreviewImages] = useState(true);
   const [imagesPerChapter, setImagesPerChapter] = useState(2);
   const [allowFreepik, setAllowFreepik] = useState(false);
   const [useOpenrouter, setUseOpenrouter] = useState(false);
+  const [relevanceMode, setRelevanceMode] = useState<"strict" | "balanced">("strict");
+  const [verifyImages, setVerifyImages] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
@@ -1970,6 +1975,14 @@ function CourseImagesPanel() {
       apiRequest(`/api/v1/course-images/reviews/${encodeURIComponent(storedId)}`, { method: "GET" })
         .then((saved: JobResponse) => {
           if (!active) return;
+          // Do not let earlier v29 reviews silently bypass the new relevance
+          // checks after an updated frontend is deployed.
+          if (!saved.details?.relevance_mode) {
+            sessionStorage.removeItem(IMAGE_REVIEW_SESSION_KEY);
+            sessionStorage.removeItem(IMAGE_REVIEW_SELECTION_KEY);
+            setError("An older image review was found. Start a new search to apply the subject-lock checks.");
+            return;
+          }
           setReviewJob(saved);
           try {
             const selected = JSON.parse(sessionStorage.getItem(IMAGE_REVIEW_SELECTION_KEY) || "[]");
@@ -2040,8 +2053,10 @@ function CourseImagesPanel() {
       form.append("generate_missing", "false");
       form.append("use_openrouter", String(useOpenrouter));
       form.append("images_per_chapter", String(imagesPerChapter));
+      form.append("relevance_mode", relevanceMode);
+      form.append("verify_images", String(verifyImages));
       if (mode === "guides" && coverFile) form.append("cover_image", coverFile);
-      if (mode === "insert" && (previewImages || file.name.toLowerCase().endsWith(".zip"))) {
+      if (mode === "insert") {
         const result: JobResponse = await apiRequest("/api/v1/course-images/review", {
           method: "POST", body: form,
         });
@@ -2147,6 +2162,14 @@ function CourseImagesPanel() {
           </label>
           {!isZipReview && <small>{item.chapter}</small>}
           {item.intended_scene && <span className="image-scene-hint"><strong>Intended photograph: </strong>{item.intended_scene}</span>}
+          <small><strong>Subject:</strong> {(item.course_domain || "not identified").replaceAll("_", " ")}</small>
+          {item.verification_method === "visual" ? (
+            <small><strong>Visual check:</strong> {typeof item.relevance_score === "number" ? `${item.relevance_score}/100 model estimate` : "checked"}. {item.relevance_reason} Always inspect the actual photograph.</small>
+          ) : item.verification_method === "metadata" ? (
+            <small><strong>Metadata filter:</strong> {typeof item.relevance_score === "number" ? `${item.relevance_score}/100 heuristic score` : "passed"}. This is not a visual check. {item.relevance_reason}</small>
+          ) : (
+            <small>Automatic visual checking not recorded for this candidate; inspect carefully before approving.</small>
+          )}
           <small><strong>Stock search:</strong> {item.search}</small>
           <small><b>{item.reused ? "Library reuse" : item.source}</b> · {item.licence || "See provider licence"}</small>
           {item.author && <small>Photo: {item.author}</small>}
@@ -2259,18 +2282,38 @@ function CourseImagesPanel() {
             <input type="checkbox" checked={reuseExisting}
               onChange={(event) => { setReuseExisting(event.target.checked); resetResults(); }} />
             <span><strong>Reuse images from the saved library</strong>
-              <small>Reuse matching, previously downloaded free photos across jobs (works with persistent Railway storage).</small></span>
+              <small>Previously approved photos can be reused after an optional visual check. Without AI vision, older library photos are skipped because their metadata cannot prove the course subject.</small></span>
           </label>
           {mode === "insert" && (
             <label className="toggle-row">
-              <input type="checkbox" checked={Boolean(file?.name.toLowerCase().endsWith(".zip")) || previewImages}
-                disabled={Boolean(file?.name.toLowerCase().endsWith(".zip"))}
-                onChange={(event) => { setPreviewImages(event.target.checked); resetResults(); }} />
-              <span><strong>Preview images before adding</strong>
-                <small>{file?.name.toLowerCase().endsWith(".zip")
-                  ? "Required for ZIP batches: approve photos per chapter and keep the original ZIP structure."
-                  : "Review candidates and uncheck unwanted images before producing the Word file."}</small></span>
+              <input type="checkbox" checked readOnly disabled />
+              <span><strong>Review and approve before inserting (required)</strong>
+                <small>Required for DOCX and ZIP: no unchecked photograph will be inserted. Original document content is preserved.</small></span>
             </label>
+          )}
+          {mode === "insert" && (
+            <fieldset className="image-source-fieldset">
+              <legend>Course relevance protection</legend>
+              <label className="toggle-row">
+                <input type="radio" name="relevance-mode" checked={relevanceMode === "strict"}
+                  onChange={() => { setRelevanceMode("strict"); resetResults(); }} />
+                <span><strong>Strict (recommended)</strong>
+                  <small>Keep the course discipline locked; skip generic or uncertain matches even if fewer images are found.</small></span>
+              </label>
+              <label className="toggle-row">
+                <input type="radio" name="relevance-mode" checked={relevanceMode === "balanced"}
+                  onChange={() => { setRelevanceMode("balanced"); resetResults(); }} />
+                <span><strong>Balanced</strong>
+                  <small>Accept a wider set of relevant metadata matches; healthcare images still need healthcare evidence.</small></span>
+              </label>
+              <label className="toggle-row">
+                <input type="checkbox" checked={verifyImages}
+                  onChange={(event) => { setVerifyImages(event.target.checked); resetResults(); }} />
+                <span><strong>Verify the actual photograph using AI vision (optional)</strong>
+                  <small>Requires OPENROUTER_API_KEY and a vision-capable OPENROUTER_VISION_MODEL on Railway. Sends public stock-image previews to OpenRouter; may incur API charges. If verification fails or is uncertain, the image is skipped.</small></span>
+              </label>
+              <p className="image-cost-notice">Without AI vision, only photograph descriptions and tags can be checked automatically. Human review is still essential. Missing subject evidence means no image, not a business-management filler.</p>
+            </fieldset>
           )}
           <label className="toggle-row">
             <input type="checkbox" checked={useOpenrouter}
@@ -2290,7 +2333,7 @@ function CourseImagesPanel() {
       {error && <div className="error-box" role="alert">{error}</div>}
       {!reviewJob && (
         <button type="submit" className="button primary large" disabled={!file || busy}>
-          {busy ? "Searching image sources…" : mode === "guides" ? "Create search guides" : (previewImages || file?.name.toLowerCase().endsWith(".zip")) ? "Find images and preview" : "Add images to Word"}
+          {busy ? "Searching image sources…" : mode === "guides" ? "Create search guides" : "Find relevant images and review"}
         </button>
       )}
       {reviewJob && !job && (
@@ -2307,7 +2350,15 @@ function CourseImagesPanel() {
             <div><strong>{reviewJob.details?.freepik_search_attempts ?? 0}</strong><span>Freepik lookup attempts</span></div>
             <div><strong>{reviewJob.details?.stock_lookups_attempted ?? 0}</strong><span>Stock-photo searches</span></div>
             <div><strong>0</strong><span>AI image generations</span></div>
+            <div><strong>{reviewJob.details?.relevance_rejections ?? 0}</strong><span>Off-topic results rejected</span></div>
+            <div><strong>{reviewJob.details?.vision_checks ?? 0}</strong><span>Visual checks performed</span></div>
           </div>
+          <p className="image-cost-notice">
+            Subject lock: <strong>{String(reviewJob.details?.course_domain || "per chapter").replaceAll("_", " ")}</strong>
+            {" · "}Relevance: <strong>{reviewJob.details?.relevance_mode === "strict" ? "Strict" : "Balanced"}</strong>
+            {" · "}Pixel verification: <strong>{reviewJob.details?.verify_images ? "Enabled" : "Off (metadata only)"}</strong>
+            . Scores are estimates, not guarantees; approve only images that clearly match the course.
+          </p>
           {reviewJob.details?.providers_configured && (
             <p className="image-cost-notice">
               Free photo APIs available on Railway: {reviewJob.details.providers_configured.pexels ? "Pexels ✓" : "Pexels not configured"} · {reviewJob.details.providers_configured.pixabay ? "Pixabay ✓" : "Pixabay not configured"} · {reviewJob.details.providers_configured.openverse ? "Openverse ✓" : "Openverse disabled"}.

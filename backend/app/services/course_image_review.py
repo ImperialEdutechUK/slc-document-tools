@@ -25,6 +25,7 @@ from .course_images import (
     _insert_images, _plans, _read_chapters, _safe_name, _chapter_overview,
 )
 from .course_image_library import ImageLibrary, SavedImage
+from .course_image_relevance import RelevanceContext, find_domain, lock_query
 from .zip_utils import normalise_zip_name, safe_zip_member
 
 # Per-request budgets; the complete ZIP may be processed in several passes.
@@ -55,6 +56,11 @@ def _provider_for_review(manifest: dict, provider: Provider | None) -> Provider:
     # Only confirmed images may enter the shared image library.
     provider.save_new_to_library = False
     provider.allow_freepik = bool(manifest.get("freepik_enabled", False))
+    if manifest.get("verify_images") and (not provider.openrouter_key or not provider.vision_model):
+        raise CourseImagesError(
+            "Visual verification requires OPENROUTER_API_KEY and OPENROUTER_VISION_MODEL on the backend. "
+            "Disable visual verification to use metadata-only subject filtering."
+        )
     if manifest["image_source"] == "freepik" and not provider.allow_freepik:
         raise CourseImagesError("Enable Freepik stock access explicitly, or select free sources only.")
     if not provider.can_acquire(generate=False):
@@ -63,6 +69,8 @@ def _provider_for_review(manifest: dict, provider: Provider | None) -> Provider:
     # Freepik paid-credit limits are cumulative across continuation requests.
     provider.freepik_attempts = int(manifest.get("freepik_search_attempts", 0))
     provider.freepik_downloads = int(manifest.get("freepik_stock_downloads", 0))
+    # Each continuation has its own vision budget; the manifest tracks totals.
+    provider.vision_checks = 0
     return provider
 
 
@@ -126,10 +134,18 @@ def _run_search_batch(manifest: dict, files: dict[str, bytes], provider: Provide
         plan = ImagePlan(**entry["plan"])
         chapter_index = entry["chapter_index"]
         chapter = entry["chapter"]
+        domain = (manifest.get("chapter_domains") or [None] * len(manifest["chapters"]))[chapter_index]
+        course = manifest.get("course_name") or manifest.get("original_filename") or ""
+        provider.active_context = RelevanceContext(
+            domain=domain, course=course, heading=plan.heading,
+            intended_scene=plan.description, query=lock_query(plan.search, domain, plan.heading),
+            mode=manifest.get("relevance_mode", "strict"),
+            verify_pixels=bool(manifest.get("verify_images", False)),
+        )
         cursor += 1  # An unsuccessful lookup is still completed; never re-charge it.
         searches_this_batch += 1
         try:
-            photo = provider.find(plan.search, subject=plan.heading, generate=False)
+            photo = provider.find(provider.active_context.query, subject=plan.heading, generate=False)
         except Exception as exc:
             manifest["warnings"].append(f"{chapter}: image search failed for '{plan.heading}' ({type(exc).__name__}).")
             photo = None
@@ -154,7 +170,13 @@ def _run_search_batch(manifest: dict, files: dict[str, bytes], provider: Provide
             "source_url": photo.source_url, "licence": photo.licence,
             "author": photo.author, "reused": photo.reused,
             "identifier": photo.identifier,
+                "relevance_score": photo.relevance_score,
+                "relevance_reason": photo.relevance_reason,
+                "verification_method": photo.verification_method or "not_checked",
+                "course_domain": domain,
         })
+
+    provider.active_context = None
 
     manifest["next_plan_index"] = cursor
     manifest["batch_count"] = int(manifest.get("batch_count", 0)) + 1
@@ -162,11 +184,18 @@ def _run_search_batch(manifest: dict, files: dict[str, bytes], provider: Provide
     manifest["image_library_hits"] = int(manifest.get("image_library_hits", 0)) + provider.library_hits
     manifest["freepik_stock_downloads"] = provider.freepik_downloads
     manifest["freepik_search_attempts"] = provider.freepik_attempts
+    manifest["relevance_rejections"] = int(manifest.get("relevance_rejections", 0)) + provider.relevance_rejections
+    manifest["vision_checks"] = int(manifest.get("vision_checks", 0)) + provider.vision_checks
     for source, count in provider.provider_attempts.items():
         manifest["provider_attempts"][source] = manifest["provider_attempts"].get(source, 0) + count
     for source, count in provider.provider_successes.items():
         manifest["provider_successes"][source] = manifest["provider_successes"].get(source, 0) + count
     manifest["warnings"].extend(provider.warnings)
+    if provider.relevance_rejections:
+        manifest["warnings"].append(
+            f"Rejected {provider.relevance_rejections} stock results in this batch because subject, "
+            "scene or visual verification was insufficient. These images were not suggested."
+        )
     _update_progress(manifest)
     if manifest["has_more"]:
         manifest["warnings"].append(
@@ -211,11 +240,14 @@ def make_image_preview(
     raw: bytes, filename: str, *, course_name: str = "", image_source: str = "mixed",
     reuse_existing: bool = True, use_openrouter: bool = False, allow_freepik: bool = False,
     images_per_chapter: int = 2, provider: Provider | None = None,
+    relevance_mode: str = "strict", verify_images: bool = False,
 ) -> PreviewBundle:
     if image_source not in {"auto", "mixed", "free", "pexels", "pixabay", "openverse", "freepik"}:
         raise CourseImagesError("Invalid stock-image source.")
     if not 1 <= images_per_chapter <= 5:
         raise CourseImagesError("Choose between 1 and 5 images per chapter.")
+    if relevance_mode not in {"strict", "balanced"}:
+        raise CourseImagesError("Select Strict or Balanced image relevance.")
     chapters, _ = _read_chapters(raw, filename)
     manifest = {
         "original_filename": filename, "course_name": course_name,
@@ -224,12 +256,14 @@ def make_image_preview(
         "eligible_by_chapter": [], "chapter_overviews": [],
         "previews": [], "pending_plans": [], "next_plan_index": 0,
         "image_source": image_source, "reuse_existing": reuse_existing,
+        "relevance_mode": relevance_mode, "verify_images": bool(verify_images),
+        "relevance_rejections": 0, "vision_checks": 0,
         "use_openrouter": use_openrouter, "images_per_chapter": images_per_chapter,
         "image_library_hits": 0, "freepik_stock_downloads": 0,
         "freepik_search_attempts": 0, "freepik_enabled": allow_freepik,
         "generation_attempts": 0, "free_replacements_used": 0,
         "stock_lookups_attempted": 0, "batch_count": 0, "missing_images": [],
-        "matching_policy": "Course title + chapter context + individual heading; stock tags are suggestions, not visual verification.",
+        "matching_policy": "Course title subject lock + heading-specific metadata filtering; optional pixel verification. Uncertain results are omitted, not inserted.",
         "provider_attempts": {"Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0},
         "provider_successes": {"Pexels": 0, "Pixabay": 0, "Openverse": 0, "Freepik": 0},
         "warnings": [], "providers_configured": {},
@@ -240,6 +274,11 @@ def make_image_preview(
         # assignment briefs, covers and other course assets at confirmation.
         files["original_upload.zip"] = raw
     chapter_plans: list[list[dict]] = []
+    manifest["chapter_domains"] = []
+    # A specific course title overrides all generic management/leadership
+    # headings, including across several different DOCX files in a ZIP.
+    course_lock = find_domain(course_name.strip() or Path(filename).stem)
+    manifest["course_domain"] = course_lock
     eligible_total = 0
     for index, chapter in enumerate(chapters):
         files[f"documents/{index}.docx"] = chapter.payload
@@ -248,8 +287,23 @@ def make_image_preview(
         manifest["eligible_by_chapter"].append(0)
         try:
             doc = Document(BytesIO(chapter.payload))
-            plans, eligible = _plans(doc, f"{course_name} {chapter.title}")
-            manifest["chapter_overviews"][index] = _chapter_overview(doc)
+            overview = _chapter_overview(doc)
+            manifest["chapter_overviews"][index] = overview
+            first_headings = " ".join(p.text for p in doc.paragraphs[:30] if p.text.strip())[:400]
+            local_domain = course_lock or find_domain(chapter.title, first_headings, overview)
+            manifest["chapter_domains"].append(local_domain)
+            # Local inference is used only if no explicit whole-course subject
+            # exists. It steers both the scene planner and its stock queries.
+            alias = {
+                "adult_safeguarding": "health and social care", "child_safeguarding": "child safeguarding",
+                "healthcare": "healthcare nursing", "education": "education teaching",
+                "hr_payroll": "human resources payroll", "counselling": "counselling therapy",
+                "it_security": "information technology", "waste": "waste management",
+                "food": "food catering", "law": "legal studies", "finance": "accounting finance",
+                "safety": "workplace safety", "management": "business management",
+            }
+            title = f"{alias.get(local_domain, '')} {course_name or Path(filename).stem} {chapter.title}".strip()
+            plans, eligible = _plans(doc, title)
             manifest["eligible_by_chapter"][index] = eligible
             eligible_total += eligible
             chosen = _balanced_plans(plans, images_per_chapter) if Path(filename).suffix.lower() == ".zip" else plans
@@ -258,7 +312,13 @@ def make_image_preview(
                 for plan in chosen
             ]
         except Exception as exc:
+            if len(manifest["chapter_domains"]) <= index:
+                manifest["chapter_domains"].append(course_lock)
             manifest["warnings"].append(f"{manifest['chapter_paths'][index]}: cannot plan images ({type(exc).__name__}); original will be preserved.")
+    if not course_lock:
+        recognised = [d for d in manifest["chapter_domains"] if d]
+        if recognised and len(set(recognised)) == 1:
+            manifest["course_domain"] = recognised[0]
     # The same round-robin is used for every follow-up search: early chapters
     # cannot consume all requests while later chapters remain unsearched.
     for position in range(max((len(group) for group in chapter_plans), default=0)):
@@ -270,6 +330,7 @@ def make_image_preview(
     manifest["providers_configured"] = {
         "pexels": bool(configured.pexels_key), "pixabay": bool(configured.pixabay_key),
         "openverse": configured.openverse_enabled, "freepik": bool(configured.freepik_key),
+        "visual_verification": bool(configured.openrouter_key and configured.vision_model),
     }
     _run_search_batch(manifest, files, configured)
     return _pack_files(files, manifest)
@@ -327,12 +388,23 @@ def replace_with_free_image(
     provider.stock_source = "free"
     provider.allow_freepik = False
     provider.reuse_existing = False  # An identical cache hit would return the original.
+    domain = item.get("course_domain")
+    old_plan = item.get("plan") or {}
+    locked_query = lock_query(query, domain, item.get("heading", ""))
+    provider.active_context = RelevanceContext(
+        domain=domain, course=manifest.get("course_name") or manifest.get("original_filename", ""),
+        heading=item.get("heading", ""), intended_scene=old_plan.get("description", ""),
+        query=locked_query, mode=manifest.get("relevance_mode", "strict"),
+        verify_pixels=bool(manifest.get("verify_images", False)),
+    )
+    if provider.active_context.verify_pixels and (not provider.openrouter_key or not provider.vision_model):
+        raise CourseImagesError("Visual verification requires OPENROUTER_API_KEY and OPENROUTER_VISION_MODEL.")
     provider.used_photos.update(
         p.get("identifier", "") for p in previews if p.get("identifier")
     )
     if not provider.can_acquire(generate=False):
         raise CourseImagesError("No free-photo provider is available. Enable Openverse or add a Pexels/Pixabay key.")
-    new_image = provider.find(query, subject=query, generate=False)
+    new_image = provider.find(locked_query, subject=item["heading"], generate=False)
     if not new_image:
         raise CourseImagesError("No different free photograph matched those words. The previous photo is still available.")
 
@@ -340,8 +412,13 @@ def replace_with_free_image(
         "search": query, "source": new_image.source, "source_url": new_image.source_url,
         "licence": new_image.licence, "author": new_image.author,
         "reused": False, "identifier": new_image.identifier,
+        "relevance_score": new_image.relevance_score,
+        "relevance_reason": new_image.relevance_reason,
+        "verification_method": new_image.verification_method or "not_checked",
     })
     item["plan"]["search"] = query
+    manifest["relevance_rejections"] = int(manifest.get("relevance_rejections", 0)) + provider.relevance_rejections
+    manifest["vision_checks"] = int(manifest.get("vision_checks", 0)) + provider.vision_checks
     manifest["free_replacements_used"] = int(manifest.get("free_replacements_used", 0)) + 1
     manifest["warnings"] = list(dict.fromkeys(manifest.get("warnings", []) + provider.warnings))
     files[f"images/{image_id}.jpg"] = new_image.payload
@@ -398,10 +475,12 @@ def _report_csv(rows: list[dict], sources: list[dict], missing: list[dict], warn
         )])
     writer.writerow([])
     writer.writerow(["Approved photographs and licence details"])
-    writer.writerow(["Chapter", "Heading", "Source provider", "Licence", "Photographer", "Source URL"])
+    writer.writerow(["Chapter", "Heading", "Source provider", "Licence", "Photographer", "Source URL",
+                     "Relevance check", "Relevance estimate (uncalibrated)", "Relevance rationale"])
     for item in sources:
         writer.writerow([_csv_value(item.get(key, "")) for key in (
-            "chapter", "heading", "provider", "licence", "author", "source_url"
+            "chapter", "heading", "provider", "licence", "author", "source_url",
+            "verification_method", "relevance_score", "relevance_reason",
         )])
     writer.writerow([])
     writer.writerow(["Searched headings without a matching photo"])
@@ -536,6 +615,9 @@ def finish_image_preview(preview_bundle: bytes, selected_ids: list[int]) -> Cour
                                 "provider": photo.source, "source_url": photo.source_url,
                                 "licence": photo.licence, "author": photo.author,
                                 "reused": photo.reused,
+                                "verification_method": item.get("verification_method", "not_checked"),
+                                "relevance_score": item.get("relevance_score"),
+                                "relevance_reason": item.get("relevance_reason", ""),
                             })
                             if manifest.get("reuse_existing", True):
                                 approved_for_cache.append((
