@@ -19,10 +19,10 @@ class VisualScene:
 
 # Order is important: more specialised teaching domains precede generic business.
 DOMAINS: tuple[tuple[str, str], ...] = (
-    ("child_safeguarding", r"safeguard.{0,35}(child|young people|children)|child.{0,35}safeguard|children in care"),
-    ("adult_safeguarding", r"safeguard|adult care|social care|care settings|residential care|dementia|care worker"),
+    ("child_safeguarding", r"safeguard.{0,35}(child|young people|children|early years|nursery)|(?:child|children|early years|nursery).{0,35}safeguard|children in care|children.?s services|child welfare"),
+    ("adult_safeguarding", r"safeguard|adult care|social care|care settings|care homes?|care team|care leadership|care planning|care (?:and )?support|care services|residential care|dementia|care worker|support worker|elderly care|care practitioners?"),
     ("education", r"eyfs|early years|childcare|nursery|pupils?|school|teaching|education|classroom|teacher"),
-    ("healthcare", r"healthcare|health care|clinical|nurs(?:e|ing)|patient|medical|public health|first aid"),
+    ("healthcare", r"healthcare|health care|clinical|nurs(?:e|ing)|patient|medical|public health|first aid|medication|medicine|pharmac|hospital|infection control"),
     ("hr_payroll", r"human resources|\bhr\b|payroll|recruitment|employment|personnel"),
     ("counselling", r"counsell?ing|therapy|therapeutic|psychology|mental health support"),
     ("it_security", r"computing|cyber|digital|software|information technology|\bit\b|network|database|programming"),
@@ -51,7 +51,7 @@ SCENES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         (r"multi.agency|partnership|joint|liaison|information shar", "healthcare social care team meeting", "health and social care practitioners coordinating individual support in a meeting"),
         (r"risk|hazard|assess|audit|monitor", "care home safety inspection", "a care supervisor assessing the safety of a residential care environment"),
         (r"voice|person.centred|rights|consent|choice|individual", "care worker listening older person", "a care professional listening respectfully to an adult receiving support"),
-        (r"mentoring|training|supervision|policy|procedure", "care staff workplace training", "a senior care practitioner guiding colleagues through a professional care procedure"),
+        (r"mentoring|training|supervision|policy|procedure|leadership|management|teamwork|coaching|delegat", "care staff workplace training", "a senior care practitioner guiding colleagues through a professional care procedure"),
         (r"medicat|medicine|prescri", "nurse medication care home", "a qualified care professional handling medication according to safe procedures"),
         (r"document|record|confidential|privacy|data", "care worker secure patient files", "a care worker carefully recording information in a private office"),
     ),
@@ -67,7 +67,7 @@ SCENES: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         (r"assess|examin|monitor|vital|diagnos", "nurse patient health check", "a healthcare professional taking an appropriate clinical measurement during a consultation"),
         (r"communicat|listen|consent|dignity", "nurse talking patient consultation", "a healthcare professional listening respectfully to a patient during a consultation"),
         (r"medicine|medicat|prescri", "nurse medicine healthcare", "a trained healthcare worker checking medication in a clinical setting"),
-        (r"team|collaborat|handover", "hospital healthcare team meeting", "healthcare practitioners discussing coordinated patient care"),
+        (r"team|collaborat|handover|leadership|management|supervis|delegat", "hospital healthcare team meeting", "healthcare practitioners discussing coordinated patient care"),
     ),
     "hr_payroll": (
         (r"payroll|wage|salary|deduct|tax|payslip|pension", "payroll accountant office computer", "a payroll professional reviewing calculations at a desk with a computer and calculator"),

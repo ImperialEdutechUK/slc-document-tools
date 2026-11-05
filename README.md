@@ -1,3 +1,6 @@
+
+**New v30 image relevance protection:** See [RELEASE_V30.md](RELEASE_V30.md) for Strict/Balanced course subject lock, optional OpenRouter visual verification, automatic rejection of off-topic stock photos, and required human approval for DOCX/ZIP images.
+
 ## Latest fix — Find & Add Images v28 (matching course + headings)
 
 **Current release: v28.** A successful Pixabay API key alone cannot ensure relevant pictures. v28 examines the course title, local paragraphs and chapter context, translates headings into realistic stock-photo scenes, matches Pixabay tags by photographic meaning instead of exact academic words, and adds a broader-query fallback. **Nothing is preselected** in the image preview: approve only suitable photos. No Freepik image credits are used unless explicitly enabled. See [RELEASE_V28.md](RELEASE_V28.md) for the fix, Railway settings, deployment and testing.
