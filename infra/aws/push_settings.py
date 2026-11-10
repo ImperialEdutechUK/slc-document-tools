@@ -87,7 +87,7 @@ def main() -> None:
                 json.dump(payload, handle)
                 temp = handle.name
             try:
-                aws("ssm", "put-parameter", "--cli-input-json", Path(temp).as_uri())
+                aws("ssm", "put-parameter", "--cli-input-json", "file://" + temp)
             finally:
                 os.unlink(temp)
             stored.append(f"{key} -> SSM")
