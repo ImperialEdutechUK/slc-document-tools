@@ -15,13 +15,20 @@ from dotenv import load_dotenv
 # still take precedence because python-dotenv does not override them by default.
 load_dotenv()
 
+# AWS Lambda: pull settings from SSM/S3 before modules read the environment.
+# No-op on Railway and locally (requires SSM_PARAMETER_PATH or S3_ENV_PREFIX).
+from .aws_runtime import load_runtime_environment  # noqa: E402
+
+load_runtime_environment()
+
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, uses_dynamodb_jobs
+from .lambda_io import install_body_offload
 from .formatter.engine import process
 from .formatter.pdf_editing import (
     PdfEditingError,
@@ -70,10 +77,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# AWS Lambda only: route bodies above the Function URL payload limit through S3.
+install_body_offload(app)
 
 
 @app.on_event("startup")
 def create_tables() -> None:
+    if uses_dynamodb_jobs():
+        return  # the DynamoDB table is created by the AWS CloudFormation stack
     Base.metadata.create_all(bind=engine)
 
 

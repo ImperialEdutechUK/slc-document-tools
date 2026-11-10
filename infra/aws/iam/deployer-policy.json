@@ -1,0 +1,146 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity", "lambda:GetAccountSettings", "servicequotas:GetServiceQuota", "tag:GetResources"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudFormationProjectStacks",
+      "Effect": "Allow",
+      "Action": "cloudformation:*",
+      "Resource": [
+        "arn:aws:cloudformation:*:174976254754:stack/slc-doc-tools*/*",
+        "arn:aws:cloudformation:*:174976254754:changeSet/*/*"
+      ]
+    },
+    {
+      "Sid": "CloudFormationGlobal",
+      "Effect": "Allow",
+      "Action": ["cloudformation:ValidateTemplate", "cloudformation:ListStacks", "cloudformation:DescribeStacks", "cloudformation:GetTemplateSummary"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrProjectRepo",
+      "Effect": "Allow",
+      "Action": "ecr:*",
+      "Resource": "arn:aws:ecr:*:174976254754:repository/slc-doc-tools*"
+    },
+    {
+      "Sid": "LambdaProjectFunctions",
+      "Effect": "Allow",
+      "Action": "lambda:*",
+      "Resource": "arn:aws:lambda:*:174976254754:function:slc-doc-tools*"
+    },
+    {
+      "Sid": "LambdaList",
+      "Effect": "Allow",
+      "Action": ["lambda:ListFunctions", "lambda:ListTags"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3ProjectBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::slc-doc-tools-*", "arn:aws:s3:::slc-doc-tools-*/*"]
+    },
+    {
+      "Sid": "S3List",
+      "Effect": "Allow",
+      "Action": ["s3:ListAllMyBuckets", "s3:GetBucketLocation"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DynamoProjectTables",
+      "Effect": "Allow",
+      "Action": "dynamodb:*",
+      "Resource": ["arn:aws:dynamodb:*:174976254754:table/slc-doc-tools*", "arn:aws:dynamodb:*:174976254754:table/slc-doc-tools*/*"]
+    },
+    {
+      "Sid": "CloudFrontAndCertificates",
+      "Effect": "Allow",
+      "Action": ["cloudfront:*", "acm:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Route53ProjectZone",
+      "Effect": "Allow",
+      "Action": ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets", "route53:GetHostedZone"],
+      "Resource": "arn:aws:route53:::hostedzone/Z0813279383BWQTTRAQUL"
+    },
+    {
+      "Sid": "Route53Read",
+      "Effect": "Allow",
+      "Action": ["route53:GetChange", "route53:ListHostedZones", "route53:ListHostedZonesByName"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamProjectRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PassRole", "iam:UpdateRole",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies",
+        "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListAttachedRolePolicies",
+        "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::174976254754:role/slc-doc-tools-*"
+    },
+    {
+      "Sid": "SsmProjectParameters",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath",
+        "ssm:DeleteParameter", "ssm:DeleteParameters", "ssm:AddTagsToResource", "ssm:ListTagsForResource"
+      ],
+      "Resource": ["arn:aws:ssm:*:174976254754:parameter/slc-doc-tools", "arn:aws:ssm:*:174976254754:parameter/slc-doc-tools/*"]
+    },
+    {
+      "Sid": "SsmDescribe",
+      "Effect": "Allow",
+      "Action": "ssm:DescribeParameters",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProjectLogs",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": ["arn:aws:logs:*:174976254754:log-group:/aws/lambda/slc-doc-tools*", "arn:aws:logs:*:174976254754:log-group:/aws/lambda/slc-doc-tools*:*"]
+    },
+    {
+      "Sid": "LogsDescribe",
+      "Effect": "Allow",
+      "Action": ["logs:DescribeLogGroups", "logs:StartQuery", "logs:GetQueryResults"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProjectSchedules",
+      "Effect": "Allow",
+      "Action": "scheduler:*",
+      "Resource": ["arn:aws:scheduler:*:174976254754:schedule/default/slc-doc-tools*", "arn:aws:scheduler:*:174976254754:schedule-group/default"]
+    },
+    {
+      "Sid": "CostGuardrails",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget", "budgets:ModifyBudget", "budgets:CreateBudgetAction", "budgets:DescribeBudgetActionsForBudget",
+        "budgets:TagResource", "budgets:ListTagsForResource",
+        "ce:GetCostAndUsage", "ce:ListCostAllocationTags", "ce:UpdateCostAllocationTagsStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MetricsRead",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:GetMetricData", "cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics"],
+      "Resource": "*"
+    }
+  ]
+}

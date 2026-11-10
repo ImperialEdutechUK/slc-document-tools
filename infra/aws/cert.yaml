@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SLC Document Tools - TLS certificate for CloudFront (must be deployed in us-east-1).
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: slc-document-formatter.imperial.imet.lk
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Default: Z0813279383BWQTTRAQUL
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Project
+          Value: slc-doc-tools
+
+Outputs:
+  CertificateArn:
+    Value: !Ref Certificate

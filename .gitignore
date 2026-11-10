@@ -32,3 +32,7 @@ freepik_storage_state.json
 *_storage_state.json
 # Generated TS cache
 *.tsbuildinfo
+
+# AWS deployment settings copied from Railway (secrets)
+infra/aws/backend-settings.env
+infra/aws/*.env

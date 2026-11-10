@@ -12,6 +12,14 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _MAX_ACCOUNTS = 10
 
 
+def _chromium_args() -> list[str]:
+    """Chromium flags; PLAYWRIGHT_EXTRA_ARGS adds environment-specific ones
+    (AWS Lambda needs --single-process/--no-zygote, set in Dockerfile.lambda)."""
+    args = ["--no-sandbox", "--disable-dev-shm-usage"]
+    args += [item for item in os.getenv("PLAYWRIGHT_EXTRA_ARGS", "").split() if item]
+    return args
+
+
 def _fallback_enabled() -> bool:
     return os.getenv("FREEPIK_ACCOUNT_FALLBACK", "false").lower() in _TRUE_VALUES
 
@@ -166,7 +174,7 @@ def _download_with_account_sync(resource_url: str, *, email: str, password: str)
         browser = p.chromium.launch(
             headless=True,
             executable_path=chromium_path if Path(chromium_path).exists() else None,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=_chromium_args(),
         )
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
@@ -404,7 +412,7 @@ def _download_with_storage_state_sync(resource_url: str, *, storage_state: dict)
         browser = p.chromium.launch(
             headless=True,
             executable_path=chromium_path if Path(chromium_path).exists() else None,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=_chromium_args(),
         )
         context = browser.new_context(accept_downloads=True, storage_state=storage_state)
         page = context.new_page()

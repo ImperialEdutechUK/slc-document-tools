@@ -68,8 +68,57 @@ function apiUrl(path?: string | null) {
   return path.startsWith("http") ? path : `${API_BASE}${path}`;
 }
 
+// AWS Lambda Function URLs accept at most ~6 MB per request. When the build
+// enables NEXT_PUBLIC_BODY_OFFLOAD, larger form uploads are sent straight to
+// S3 with a pre-signed URL and the API request carries only a reference; the
+// backend restores the original body. Railway/Vercel builds skip this.
+const BODY_OFFLOAD_ENABLED = process.env.NEXT_PUBLIC_BODY_OFFLOAD === "1";
+const BODY_OFFLOAD_THRESHOLD = 4_000_000;
+
+async function offloadLargeBody(options: RequestInit): Promise<RequestInit> {
+  if (!BODY_OFFLOAD_ENABLED || !(options.body instanceof FormData)) {
+    return options;
+  }
+
+  const encoded = new Request("https://body-offload.invalid/", {
+    method: "POST",
+    body: options.body,
+  });
+  const contentType =
+    encoded.headers.get("content-type") || "multipart/form-data";
+  const blob = await encoded.blob();
+  if (blob.size <= BODY_OFFLOAD_THRESHOLD) {
+    return options;
+  }
+
+  const ticketResponse = await fetch(`${API_BASE}/api/v1/transfer/upload-url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ size: blob.size }),
+  });
+  if (!ticketResponse.ok) {
+    throw new Error(
+      await responseError(ticketResponse, "The upload could not be prepared.")
+    );
+  }
+  const ticket: { key: string; url: string } = await ticketResponse.json();
+
+  const upload = await fetch(ticket.url, { method: "PUT", body: blob });
+  if (!upload.ok) {
+    throw new Error("The file could not be uploaded. Please try again.");
+  }
+
+  const headers = new Headers(options.headers);
+  headers.set("X-Body-S3-Key", ticket.key);
+  headers.set("X-Body-Content-Type", contentType);
+  return { ...options, body: null, headers };
+}
+
 async function apiRequest(path: string, options: RequestInit) {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const response = await fetch(
+    `${API_BASE}${path}`,
+    await offloadLargeBody(options)
+  );
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {

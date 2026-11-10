@@ -1,0 +1,48 @@
+# AWS Lambda container image for the SLC Document Tools API.
+# Same runtime as the Railway Dockerfile (LibreOffice + UNO, Chromium for the
+# Freepik browser fallback, exact Garamond fonts), plus the AWS Lambda Web
+# Adapter, which runs the unchanged FastAPI/uvicorn app behind a Function URL.
+# The Railway Dockerfile is intentionally left untouched.
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 AS lambda-adapter
+
+FROM python:3.12-slim
+
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    # Lambda Web Adapter
+    AWS_LWA_PORT=8080 \
+    AWS_LWA_READINESS_CHECK_PATH=/health \
+    AWS_LWA_ASYNC_INIT=true \
+    # Lambda's filesystem is read-only except /tmp
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_CONFIG_HOME=/tmp/.config \
+    STORAGE_DIR=/tmp/slc-document-tools \
+    # Chromium inside the Lambda sandbox (Freepik account fallback)
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+    PLAYWRIGHT_EXTRA_ARGS="--single-process --no-zygote --disable-gpu"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libreoffice-writer \
+       python3-uno \
+       fontconfig \
+       fonts-liberation \
+       fonts-dejavu-core \
+       chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY fonts/ /usr/local/share/fonts/slc/
+RUN fc-cache -f
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --timeout-keep-alive 900"]

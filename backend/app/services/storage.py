@@ -69,6 +69,13 @@ class Storage:
             )
             access_key = _setting("S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
             secret_key = _setting("S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
+            # AWS Lambda/ECS role credentials are temporary and need their session
+            # token. Only forward it when the keys came from the AWS_* names.
+            session_token = (
+                _setting("AWS_SESSION_TOKEN")
+                if access_key and access_key == _setting("AWS_ACCESS_KEY_ID")
+                else None
+            )
             region = _setting("S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION") or (
                 "auto" if endpoint else "us-east-1"
             )
@@ -87,6 +94,7 @@ class Storage:
                 endpoint_url=endpoint.rstrip("/") if endpoint else None,
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
+                aws_session_token=session_token,
                 region_name=region,
                 config=Config(
                     signature_version="s3v4",
