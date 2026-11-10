@@ -67,10 +67,13 @@ def main() -> None:
     account = aws("sts", "get-caller-identity", "--query", "Account", "--output", "text")
     bucket = f"slc-doc-tools-data-{account}"
 
-    stored, skipped = [], []
+    stored, skipped, unresolved = [], [], []
     for key, value in sorted(values.items()):
         if key in SKIP_EXACT or key.startswith(SKIP_PREFIXES):
             skipped.append(key)
+            continue
+        if "${{" in value:
+            unresolved.append(key)
             continue
         if len(value.encode("utf-8")) <= SSM_MAX:
             payload = {
@@ -103,6 +106,11 @@ def main() -> None:
         print("  " + line)
     if skipped:
         print("Skipped (Railway infrastructure, set by AWS instead): " + ", ".join(skipped))
+    if unresolved:
+        print(
+            "NOT stored - these are Railway references (${{...}}), not real values. "
+            "Replace them with the actual values in the env file and run again: " + ", ".join(unresolved)
+        )
     print("Run 'bash infra/aws/deploy.sh restart' so running Lambda instances load the new settings.")
 
 
